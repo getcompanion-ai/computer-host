@@ -39,7 +39,6 @@ func buildSDKConfig(spec MachineSpec, paths machinePaths, network NetworkAllocat
 	}
 
 	cfg := sdk.Config{
-		SocketPath:      paths.SocketName,
 		KernelImagePath: spec.KernelImagePath,
 		KernelArgs:      strings.TrimSpace(spec.KernelArgs),
 		Drives:          drives.Build(),
@@ -68,6 +67,7 @@ func buildSDKConfig(spec MachineSpec, paths machinePaths, network NetworkAllocat
 			JailerBinary:   jailerBinaryPath,
 			ChrootBaseDir:  paths.JailerBaseDir,
 			ChrootStrategy: sdk.NewNaiveChrootStrategy(filepath.Clean(spec.KernelImagePath)),
+			CgroupVersion:  "2",
 		},
 		VMID: string(spec.ID),
 	}
