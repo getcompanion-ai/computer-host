@@ -5,6 +5,18 @@ import "time"
 // Phase represents the lifecycle phase of a local microVM.
 type Phase string
 
+// MachineState describes the current host local state for a machine.
+type MachineState struct {
+	ID          MachineID
+	Phase       Phase
+	PID         int
+	RuntimeHost string
+	SocketPath  string
+	TapName     string
+	StartedAt   *time.Time
+	Error       string
+}
+
 const (
 	// PhaseProvisioning means host-local resources are still being prepared.
 	PhaseProvisioning Phase = "provisioning"
@@ -17,15 +29,3 @@ const (
 	// PhaseError means the runtime observed a terminal failure.
 	PhaseError Phase = "error"
 )
-
-// MachineState describes the current host-local state for a machine.
-type MachineState struct {
-	ID          MachineID
-	Phase       Phase
-	PID         int
-	RuntimeHost string
-	SocketPath  string
-	TapName     string
-	StartedAt   *time.Time
-	Error       string
-}

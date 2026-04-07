@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// MachineID uniquely identifies a single microVM on a host.
+// MachineID uniquely identifies a single firecracler microVM
 type MachineID string
 
 // MachineSpec describes the minimum machine inputs required to boot a guest.
@@ -19,6 +19,20 @@ type MachineSpec struct {
 	KernelArgs      string
 	Drives          []DriveSpec
 	Vsock           *VsockSpec
+}
+
+// DriveSpec describes an additional guest block device.
+type DriveSpec struct {
+	ID       string
+	Path     string
+	ReadOnly bool
+}
+
+// VsockSpec describes a single host-guest vsock device.
+type VsockSpec struct {
+	ID   string
+	CID  uint32
+	Path string
 }
 
 // Validate reports whether the machine specification is usable for boot.
@@ -54,13 +68,6 @@ func (s MachineSpec) Validate() error {
 	return nil
 }
 
-// DriveSpec describes an additional guest block device.
-type DriveSpec struct {
-	ID       string
-	Path     string
-	ReadOnly bool
-}
-
 // Validate reports whether the drive specification is usable.
 func (d DriveSpec) Validate() error {
 	if strings.TrimSpace(d.ID) == "" {
@@ -72,20 +79,13 @@ func (d DriveSpec) Validate() error {
 	return nil
 }
 
-// VsockSpec describes a single host-guest vsock device.
-type VsockSpec struct {
-	ID   string
-	CID  uint32
-	Path string
-}
-
 // Validate reports whether the vsock specification is usable.
 func (v VsockSpec) Validate() error {
 	if strings.TrimSpace(v.ID) == "" {
 		return fmt.Errorf("vsock id is required")
 	}
 	if v.CID == 0 {
-		return fmt.Errorf("vsock cid must be non-zero")
+		return fmt.Errorf("vsock cid must be non zero")
 	}
 	if strings.TrimSpace(v.Path) == "" {
 		return fmt.Errorf("vsock path is required")

@@ -26,18 +26,28 @@ type NetworkAllocation struct {
 	GuestMAC    string
 }
 
-// GuestIP returns the guest IP address.
-func (n NetworkAllocation) GuestIP() netip.Addr {
-	return n.GuestCIDR.Addr()
-}
-
 // NetworkAllocator allocates /30 tap networks to machines.
 type NetworkAllocator struct {
 	basePrefix netip.Prefix
 }
 
-// NewNetworkAllocator returns a new /30 allocator rooted at the provided IPv4
-// prefix.
+// NetworkProvisioner prepares the host-side tap device for a machine.
+type NetworkProvisioner interface {
+	Ensure(context.Context, NetworkAllocation) error
+	Remove(context.Context, NetworkAllocation) error
+}
+
+// IPTapProvisioner provisions tap devices through the `ip` CLI.
+type IPTapProvisioner struct {
+	runCommand func(context.Context, string, ...string) error
+}
+
+// GuestIP returns the guest IP address.
+func (n NetworkAllocation) GuestIP() netip.Addr {
+	return n.GuestCIDR.Addr()
+}
+
+// NewNetworkAllocator returns a new /30 allocator rooted at the provided IPv4 prefix.
 func NewNetworkAllocator(cidr string) (*NetworkAllocator, error) {
 	cidr = strings.TrimSpace(cidr)
 	if cidr == "" {
@@ -105,17 +115,6 @@ func (a *NetworkAllocator) networkForIndex(index int) (NetworkAllocation, error)
 		GatewayIP:   hostIP,
 		GuestMAC:    macForIPv4(guestIP),
 	}, nil
-}
-
-// NetworkProvisioner prepares the host-side tap device for a machine.
-type NetworkProvisioner interface {
-	Ensure(context.Context, NetworkAllocation) error
-	Remove(context.Context, NetworkAllocation) error
-}
-
-// IPTapProvisioner provisions tap devices through the `ip` CLI.
-type IPTapProvisioner struct {
-	runCommand func(context.Context, string, ...string) error
 }
 
 // NewIPTapProvisioner returns a provisioner backed by `ip`.
