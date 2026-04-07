@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -11,13 +12,21 @@ import (
 	models "github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 )
 
-func buildSDKConfig(spec MachineSpec, paths machinePaths, network NetworkAllocation, runtime RuntimeConfig) (sdk.Config, error) {
+const defaultNumaNode = 0
+
+func buildSDKConfig(spec MachineSpec, paths machinePaths, network NetworkAllocation, firecrackerBinaryPath string, jailerBinaryPath string) (sdk.Config, error) {
 	if err := spec.Validate(); err != nil {
 		return sdk.Config{}, err
 	}
 
-	if runtime.FirecrackerBinaryPath == "" {
+	firecrackerBinaryPath = strings.TrimSpace(firecrackerBinaryPath)
+	if firecrackerBinaryPath == "" {
 		return sdk.Config{}, fmt.Errorf("firecracker binary path is required")
+	}
+
+	jailerBinaryPath = strings.TrimSpace(jailerBinaryPath)
+	if jailerBinaryPath == "" {
+		return sdk.Config{}, fmt.Errorf("jailer binary path is required")
 	}
 
 	drives := sdk.NewDrivesBuilder(spec.RootFSPath)
@@ -51,12 +60,12 @@ func buildSDKConfig(spec MachineSpec, paths machinePaths, network NetworkAllocat
 			Smt:        sdk.Bool(false),
 		},
 		JailerCfg: &sdk.JailerConfig{
-			GID:            sdk.Int(runtime.JailerGID),
-			UID:            sdk.Int(runtime.JailerUID),
+			GID:            sdk.Int(os.Getgid()),
+			UID:            sdk.Int(os.Getuid()),
 			ID:             string(spec.ID),
-			NumaNode:       sdk.Int(runtime.NumaNode),
-			ExecFile:       runtime.FirecrackerBinaryPath,
-			JailerBinary:   runtime.JailerBinaryPath,
+			NumaNode:       sdk.Int(defaultNumaNode),
+			ExecFile:       firecrackerBinaryPath,
+			JailerBinary:   jailerBinaryPath,
 			ChrootBaseDir:  paths.JailerBaseDir,
 			ChrootStrategy: sdk.NewNaiveChrootStrategy(filepath.Clean(spec.KernelImagePath)),
 		},

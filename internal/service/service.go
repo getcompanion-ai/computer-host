@@ -3,8 +3,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
@@ -25,28 +23,21 @@ type Service struct {
 	runtime MachineRuntime
 }
 
-// CreateMachineRequest contains the minimum machine creation inputs above the
-// raw runtime layer.
+// CreateMachineRequest contains the minimum machine creation inputs above the raw runtime layer.
 type CreateMachineRequest struct {
-	ID              firecracker.MachineID
-	KernelImagePath string
-	RootFSPath      string
-	KernelArgs      string
-	VCPUs           int64
-	MemoryMiB       int64
-	Drives          []firecracker.DriveSpec
-	VSock           *firecracker.VsockSpec
+	ID firecracker.MachineID
 }
+
+const (
+	defaultGuestKernelArgs = "console=ttyS0 reboot=k panic=1 pci=off"
+	defaultGuestMemoryMiB  = int64(512)
+	defaultGuestVCPUs      = int64(1)
+)
 
 // New constructs a new host-local service from the app config.
 func New(cfg appconfig.Config) (*Service, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
-	}
-	if cfg.VSock.Enabled {
-		if err := os.MkdirAll(cfg.VSock.BaseDir, 0o755); err != nil {
-			return nil, fmt.Errorf("create vsock base dir %q: %w", cfg.VSock.BaseDir, err)
-		}
 	}
 
 	runtime, err := firecracker.NewRuntime(cfg.FirecrackerRuntimeConfig())
@@ -60,8 +51,7 @@ func New(cfg appconfig.Config) (*Service, error) {
 	}, nil
 }
 
-// CreateMachine boots a new local machine using config defaults plus request
-// overrides.
+// CreateMachine boots a new local machine from the single supported host default shape.
 func (s *Service) CreateMachine(ctx context.Context, req CreateMachineRequest) (*firecracker.MachineState, error) {
 	spec, err := s.buildMachineSpec(req)
 	if err != nil {
@@ -86,49 +76,21 @@ func (s *Service) DeleteMachine(ctx context.Context, id firecracker.MachineID) e
 }
 
 func (s *Service) buildMachineSpec(req CreateMachineRequest) (firecracker.MachineSpec, error) {
-	if strings.TrimSpace(string(req.ID)) == "" {
-		return firecracker.MachineSpec{}, fmt.Errorf("machine id is required")
-	}
 	if s == nil {
 		return firecracker.MachineSpec{}, fmt.Errorf("service is required")
+	}
+	if strings.TrimSpace(string(req.ID)) == "" {
+		return firecracker.MachineSpec{}, fmt.Errorf("machine id is required")
 	}
 
 	spec := firecracker.MachineSpec{
 		ID:              req.ID,
-		VCPUs:           s.config.Machine.VCPUs,
-		MemoryMiB:       s.config.Machine.MemoryMiB,
-		KernelImagePath: s.config.Machine.KernelImagePath,
-		RootFSPath:      s.config.Machine.RootFSPath,
-		KernelArgs:      s.config.Machine.KernelArgs,
-		Drives:          append([]firecracker.DriveSpec(nil), req.Drives...),
+		VCPUs:           defaultGuestVCPUs,
+		MemoryMiB:       defaultGuestMemoryMiB,
+		KernelImagePath: s.config.KernelImagePath,
+		RootFSPath:      s.config.RootFSPath,
+		KernelArgs:      defaultGuestKernelArgs,
 	}
-
-	if value := strings.TrimSpace(req.KernelImagePath); value != "" {
-		spec.KernelImagePath = value
-	}
-	if value := strings.TrimSpace(req.RootFSPath); value != "" {
-		spec.RootFSPath = value
-	}
-	if value := strings.TrimSpace(req.KernelArgs); value != "" {
-		spec.KernelArgs = value
-	}
-	if req.VCPUs > 0 {
-		spec.VCPUs = req.VCPUs
-	}
-	if req.MemoryMiB > 0 {
-		spec.MemoryMiB = req.MemoryMiB
-	}
-	if req.VSock != nil {
-		vsock := *req.VSock
-		spec.Vsock = &vsock
-	} else if s.config.VSock.Enabled {
-		spec.Vsock = &firecracker.VsockSpec{
-			ID:   s.config.VSock.ID,
-			CID:  s.config.VSock.CID,
-			Path: filepath.Join(s.config.VSock.BaseDir, string(req.ID)+".sock"),
-		}
-	}
-
 	if err := spec.Validate(); err != nil {
 		return firecracker.MachineSpec{}, err
 	}

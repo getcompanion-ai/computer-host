@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,22 +21,18 @@ type RuntimeConfig struct {
 	RootDir               string
 	FirecrackerBinaryPath string
 	JailerBinaryPath      string
-	JailerUID             int
-	JailerGID             int
-	NumaNode              int
-	NetworkCIDR           string
-	NetworkAllocator      *NetworkAllocator
-	NetworkProvisioner    NetworkProvisioner
 }
 
 // Runtime manages local Firecracker machines on a single host.
 type Runtime struct {
-	config RuntimeConfig
+	rootDir               string
+	firecrackerBinaryPath string
+	jailerBinaryPath      string
+	networkAllocator      *NetworkAllocator
+	networkProvisioner    NetworkProvisioner
 
 	mu       sync.RWMutex
 	machines map[MachineID]*managedMachine
-
-	newMachine func(context.Context, sdk.Config) (*sdk.Machine, error)
 }
 
 type managedMachine struct {
@@ -46,48 +43,48 @@ type managedMachine struct {
 	state   MachineState
 }
 
+const (
+	defaultVSockCIDStart = uint32(3)
+	defaultVSockDirName  = "vsock"
+	defaultVSockID       = "vsock0"
+)
+
 // NewRuntime creates a new host-local Firecracker runtime wrapper.
 func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
-	cfg.RootDir = filepath.Clean(cfg.RootDir)
-	if cfg.RootDir == "." || cfg.RootDir == "" {
+	rootDir := filepath.Clean(strings.TrimSpace(cfg.RootDir))
+	if rootDir == "." || rootDir == "" {
 		return nil, fmt.Errorf("runtime root dir is required")
 	}
-	if err := os.MkdirAll(cfg.RootDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create runtime root dir %q: %w", cfg.RootDir, err)
+
+	firecrackerBinaryPath := strings.TrimSpace(cfg.FirecrackerBinaryPath)
+	if firecrackerBinaryPath == "" {
+		return nil, fmt.Errorf("firecracker binary path is required")
 	}
 
-	if cfg.FirecrackerBinaryPath == "" {
-		cfg.FirecrackerBinaryPath = "firecracker"
+	jailerBinaryPath := strings.TrimSpace(cfg.JailerBinaryPath)
+	if jailerBinaryPath == "" {
+		return nil, fmt.Errorf("jailer binary path is required")
 	}
-	if cfg.JailerBinaryPath == "" {
-		cfg.JailerBinaryPath = "jailer"
+
+	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create runtime root dir %q: %w", rootDir, err)
 	}
-	if cfg.JailerUID == 0 {
-		cfg.JailerUID = os.Getuid()
+	if err := os.MkdirAll(filepath.Join(rootDir, defaultVSockDirName), 0o755); err != nil {
+		return nil, fmt.Errorf("create runtime vsock dir: %w", err)
 	}
-	if cfg.JailerGID == 0 {
-		cfg.JailerGID = os.Getgid()
-	}
-	if cfg.NumaNode < 0 {
-		cfg.NumaNode = 0
-	}
-	if cfg.NetworkAllocator == nil {
-		allocator, err := NewNetworkAllocator(cfg.NetworkCIDR)
-		if err != nil {
-			return nil, err
-		}
-		cfg.NetworkAllocator = allocator
-	}
-	if cfg.NetworkProvisioner == nil {
-		cfg.NetworkProvisioner = NewIPTapProvisioner()
+
+	allocator, err := NewNetworkAllocator(defaultNetworkCIDR)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Runtime{
-		config:   cfg,
-		machines: make(map[MachineID]*managedMachine),
-		newMachine: func(ctx context.Context, cfg sdk.Config) (*sdk.Machine, error) {
-			return sdk.NewMachine(ctx, cfg)
-		},
+		rootDir:               rootDir,
+		firecrackerBinaryPath: firecrackerBinaryPath,
+		jailerBinaryPath:      jailerBinaryPath,
+		networkAllocator:      allocator,
+		networkProvisioner:    NewIPTapProvisioner(),
+		machines:              make(map[MachineID]*managedMachine),
 	}, nil
 }
 
@@ -102,12 +99,25 @@ func (r *Runtime) Boot(ctx context.Context, spec MachineSpec) (*MachineState, er
 		r.mu.Unlock()
 		return nil, fmt.Errorf("machine %q already exists", spec.ID)
 	}
+
 	usedNetworks := make([]NetworkAllocation, 0, len(r.machines))
+	usedVSockCIDs := make(map[uint32]struct{}, len(r.machines))
 	for _, machine := range r.machines {
-		if machine != nil {
-			usedNetworks = append(usedNetworks, machine.network)
+		if machine == nil {
+			continue
+		}
+		usedNetworks = append(usedNetworks, machine.network)
+		if machine.spec.Vsock != nil {
+			usedVSockCIDs[machine.spec.Vsock.CID] = struct{}{}
 		}
 	}
+
+	spec, err := r.resolveVSock(spec, usedVSockCIDs)
+	if err != nil {
+		r.mu.Unlock()
+		return nil, err
+	}
+
 	r.machines[spec.ID] = &managedMachine{
 		spec: spec,
 		state: MachineState{
@@ -118,7 +128,8 @@ func (r *Runtime) Boot(ctx context.Context, spec MachineSpec) (*MachineState, er
 	r.mu.Unlock()
 
 	cleanup := func(network NetworkAllocation, paths machinePaths) {
-		_ = r.config.NetworkProvisioner.Remove(context.Background(), network)
+		_ = r.networkProvisioner.Remove(context.Background(), network)
+		_ = removeIfExists(vsockPath(spec))
 		if paths.BaseDir != "" {
 			_ = os.RemoveAll(paths.BaseDir)
 		}
@@ -127,13 +138,13 @@ func (r *Runtime) Boot(ctx context.Context, spec MachineSpec) (*MachineState, er
 		r.mu.Unlock()
 	}
 
-	network, err := r.config.NetworkAllocator.Allocate(usedNetworks)
+	network, err := r.networkAllocator.Allocate(usedNetworks)
 	if err != nil {
 		cleanup(NetworkAllocation{}, machinePaths{})
 		return nil, err
 	}
 
-	paths, err := buildMachinePaths(r.config.RootDir, spec.ID, r.config.FirecrackerBinaryPath)
+	paths, err := buildMachinePaths(r.rootDir, spec.ID, r.firecrackerBinaryPath)
 	if err != nil {
 		cleanup(network, machinePaths{})
 		return nil, err
@@ -142,18 +153,18 @@ func (r *Runtime) Boot(ctx context.Context, spec MachineSpec) (*MachineState, er
 		cleanup(network, paths)
 		return nil, fmt.Errorf("create machine jailer dir %q: %w", paths.JailerBaseDir, err)
 	}
-	if err := r.config.NetworkProvisioner.Ensure(ctx, network); err != nil {
+	if err := r.networkProvisioner.Ensure(ctx, network); err != nil {
 		cleanup(network, paths)
 		return nil, err
 	}
 
-	cfg, err := buildSDKConfig(spec, paths, network, r.config)
+	cfg, err := buildSDKConfig(spec, paths, network, r.firecrackerBinaryPath, r.jailerBinaryPath)
 	if err != nil {
 		cleanup(network, paths)
 		return nil, err
 	}
 
-	machine, err := r.newMachine(ctx, cfg)
+	machine, err := sdk.NewMachine(ctx, cfg)
 	if err != nil {
 		cleanup(network, paths)
 		return nil, fmt.Errorf("create firecracker machine: %w", err)
@@ -263,7 +274,10 @@ func (r *Runtime) Delete(ctx context.Context, id MachineID) error {
 			return err
 		}
 	}
-	if err := r.config.NetworkProvisioner.Remove(ctx, entry.network); err != nil {
+	if err := r.networkProvisioner.Remove(ctx, entry.network); err != nil {
+		return err
+	}
+	if err := removeIfExists(vsockPath(entry.spec)); err != nil {
 		return err
 	}
 	if err := os.RemoveAll(entry.paths.BaseDir); err != nil {
@@ -298,4 +312,51 @@ func (r *Runtime) watchMachine(id MachineID, machine *sdk.Machine) {
 		entry.state.Phase = PhaseStopped
 	}
 	entry.state.Error = ""
+}
+
+func (r *Runtime) resolveVSock(spec MachineSpec, used map[uint32]struct{}) (MachineSpec, error) {
+	if spec.Vsock != nil {
+		if _, exists := used[spec.Vsock.CID]; exists {
+			return MachineSpec{}, fmt.Errorf("vsock cid %d already in use", spec.Vsock.CID)
+		}
+		return spec, nil
+	}
+
+	cid, err := nextVSockCID(used)
+	if err != nil {
+		return MachineSpec{}, err
+	}
+
+	spec.Vsock = &VsockSpec{
+		ID:   defaultVSockID,
+		CID:  cid,
+		Path: filepath.Join(r.rootDir, defaultVSockDirName, string(spec.ID)+".sock"),
+	}
+	return spec, nil
+}
+
+func nextVSockCID(used map[uint32]struct{}) (uint32, error) {
+	for cid := defaultVSockCIDStart; cid != 0; cid++ {
+		if _, exists := used[cid]; !exists {
+			return cid, nil
+		}
+	}
+	return 0, fmt.Errorf("vsock cid space exhausted")
+}
+
+func vsockPath(spec MachineSpec) string {
+	if spec.Vsock == nil {
+		return ""
+	}
+	return strings.TrimSpace(spec.Vsock.Path)
+}
+
+func removeIfExists(path string) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove path %q: %w", path, err)
+	}
+	return nil
 }
