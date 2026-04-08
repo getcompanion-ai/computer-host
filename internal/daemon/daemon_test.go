@@ -215,6 +215,7 @@ func testConfig(root string) appconfig.Config {
 		MachineDisksDir:       filepath.Join(root, "machine-disks"),
 		RuntimeDir:            filepath.Join(root, "runtime"),
 		SocketPath:            filepath.Join(root, "firecracker-host.sock"),
+		EgressInterface:       "eth0",
 		FirecrackerBinaryPath: "/usr/bin/firecracker",
 		JailerBinaryPath:      "/usr/bin/jailer",
 	}

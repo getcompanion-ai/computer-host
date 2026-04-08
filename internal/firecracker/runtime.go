@@ -21,6 +21,7 @@ var (
 
 type RuntimeConfig struct {
 	RootDir               string
+	EgressInterface       string
 	FirecrackerBinaryPath string
 	JailerBinaryPath      string
 }
@@ -50,6 +51,10 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	if jailerBinaryPath == "" {
 		return nil, fmt.Errorf("jailer binary path is required")
 	}
+	egressInterface := strings.TrimSpace(cfg.EgressInterface)
+	if egressInterface == "" {
+		return nil, fmt.Errorf("egress interface is required")
+	}
 
 	if err := os.MkdirAll(rootDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create runtime root dir %q: %w", rootDir, err)
@@ -65,7 +70,7 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		firecrackerBinaryPath: firecrackerBinaryPath,
 		jailerBinaryPath:      jailerBinaryPath,
 		networkAllocator:      allocator,
-		networkProvisioner:    NewIPTapProvisioner(),
+		networkProvisioner:    NewIPTapProvisioner(defaultNetworkCIDR, egressInterface),
 	}, nil
 }
 

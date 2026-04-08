@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -179,6 +181,67 @@ func defaultMachinePorts() []contracthost.MachinePort {
 	}
 }
 
+func hasGuestConfig(config *contracthost.GuestConfig) bool {
+	if config == nil {
+		return false
+	}
+	return len(config.AuthorizedKeys) > 0 || config.LoginWebhook != nil
+}
+
+func injectGuestConfig(ctx context.Context, imagePath string, config *contracthost.GuestConfig) error {
+	if !hasGuestConfig(config) {
+		return nil
+	}
+	stagingDir, err := os.MkdirTemp(filepath.Dir(imagePath), "guest-config-*")
+	if err != nil {
+		return fmt.Errorf("create guest config staging dir: %w", err)
+	}
+	defer os.RemoveAll(stagingDir)
+
+	if len(config.AuthorizedKeys) > 0 {
+		authorizedKeysPath := filepath.Join(stagingDir, "authorized_keys")
+		payload := []byte(strings.Join(config.AuthorizedKeys, "\n") + "\n")
+		if err := os.WriteFile(authorizedKeysPath, payload, 0o600); err != nil {
+			return fmt.Errorf("write authorized_keys staging file: %w", err)
+		}
+		if err := replaceExt4File(ctx, imagePath, authorizedKeysPath, "/etc/microagent/authorized_keys"); err != nil {
+			return err
+		}
+	}
+
+	if config.LoginWebhook != nil {
+		guestConfigPath := filepath.Join(stagingDir, "guest-config.json")
+		payload, err := json.Marshal(config)
+		if err != nil {
+			return fmt.Errorf("marshal guest config: %w", err)
+		}
+		if err := os.WriteFile(guestConfigPath, append(payload, '\n'), 0o600); err != nil {
+			return fmt.Errorf("write guest config staging file: %w", err)
+		}
+		if err := replaceExt4File(ctx, imagePath, guestConfigPath, "/etc/microagent/guest-config.json"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func replaceExt4File(ctx context.Context, imagePath string, sourcePath string, targetPath string) error {
+	_ = runDebugFS(ctx, imagePath, fmt.Sprintf("rm %s", targetPath))
+	if err := runDebugFS(ctx, imagePath, fmt.Sprintf("write %s %s", sourcePath, targetPath)); err != nil {
+		return fmt.Errorf("inject %q into %q: %w", targetPath, imagePath, err)
+	}
+	return nil
+}
+
+func runDebugFS(ctx context.Context, imagePath string, command string) error {
+	cmd := exec.CommandContext(ctx, "debugfs", "-w", "-R", command, imagePath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("debugfs %q on %q: %w: %s", command, imagePath, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
 func machineIDPtr(machineID contracthost.MachineID) *contracthost.MachineID {
 	value := machineID
 	return &value
@@ -225,6 +288,23 @@ func validateArtifactRef(ref contracthost.ArtifactRef) error {
 	}
 	if err := validateDownloadURL("artifact.rootfs_url", ref.RootFSURL); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateGuestConfig(config *contracthost.GuestConfig) error {
+	if config == nil {
+		return nil
+	}
+	for i, key := range config.AuthorizedKeys {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("guest_config.authorized_keys[%d] is required", i)
+		}
+	}
+	if config.LoginWebhook != nil {
+		if err := validateDownloadURL("guest_config.login_webhook.url", config.LoginWebhook.URL); err != nil {
+			return err
+		}
 	}
 	return nil
 }

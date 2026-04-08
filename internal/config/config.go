@@ -20,6 +20,7 @@ type Config struct {
 	MachineDisksDir       string
 	RuntimeDir            string
 	SocketPath            string
+	EgressInterface       string
 	FirecrackerBinaryPath string
 	JailerBinaryPath      string
 }
@@ -35,6 +36,7 @@ func Load() (Config, error) {
 		MachineDisksDir:       filepath.Join(rootDir, "machine-disks"),
 		RuntimeDir:            filepath.Join(rootDir, "runtime"),
 		SocketPath:            filepath.Join(rootDir, defaultSocketName),
+		EgressInterface:       strings.TrimSpace(os.Getenv("FIRECRACKER_HOST_EGRESS_INTERFACE")),
 		FirecrackerBinaryPath: strings.TrimSpace(os.Getenv("FIRECRACKER_BINARY_PATH")),
 		JailerBinaryPath:      strings.TrimSpace(os.Getenv("JAILER_BINARY_PATH")),
 	}
@@ -73,6 +75,9 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.SocketPath) == "" {
 		return fmt.Errorf("socket path is required")
 	}
+	if strings.TrimSpace(c.EgressInterface) == "" {
+		return fmt.Errorf("FIRECRACKER_HOST_EGRESS_INTERFACE is required")
+	}
 	return nil
 }
 
@@ -80,6 +85,7 @@ func (c Config) Validate() error {
 func (c Config) FirecrackerRuntimeConfig() firecracker.RuntimeConfig {
 	return firecracker.RuntimeConfig{
 		RootDir:               c.RuntimeDir,
+		EgressInterface:       c.EgressInterface,
 		FirecrackerBinaryPath: c.FirecrackerBinaryPath,
 		JailerBinaryPath:      c.JailerBinaryPath,
 	}

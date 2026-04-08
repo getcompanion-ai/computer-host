@@ -20,6 +20,9 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	if err := validateArtifactRef(req.Artifact); err != nil {
 		return nil, err
 	}
+	if err := validateGuestConfig(req.GuestConfig); err != nil {
+		return nil, err
+	}
 
 	unlock := d.lockMachine(req.MachineID)
 	defer unlock()
@@ -60,6 +63,17 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 		return nil, fmt.Errorf("create system volume dir for %q: %w", req.MachineID, err)
 	}
 	if err := cloneFile(artifact.RootFSPath, systemVolumePath); err != nil {
+		return nil, err
+	}
+	removeSystemVolumeOnFailure := true
+	defer func() {
+		if !removeSystemVolumeOnFailure {
+			return
+		}
+		_ = os.Remove(systemVolumePath)
+		_ = os.RemoveAll(filepath.Dir(systemVolumePath))
+	}()
+	if err := injectGuestConfig(ctx, systemVolumePath, req.GuestConfig); err != nil {
 		return nil, err
 	}
 
@@ -140,6 +154,7 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 		return nil, err
 	}
 
+	removeSystemVolumeOnFailure = false
 	clearOperation = true
 	return &contracthost.CreateMachineResponse{Machine: machineToContract(record)}, nil
 }

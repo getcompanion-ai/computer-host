@@ -15,10 +15,21 @@ type Machine struct {
 	StartedAt      *time.Time    `json:"started_at,omitempty"`
 }
 
+type GuestConfig struct {
+	AuthorizedKeys []string           `json:"authorized_keys,omitempty"`
+	LoginWebhook   *GuestLoginWebhook `json:"login_webhook,omitempty"`
+}
+
+type GuestLoginWebhook struct {
+	URL         string `json:"url"`
+	BearerToken string `json:"bearer_token,omitempty"`
+}
+
 type CreateMachineRequest struct {
-	MachineID     MachineID   `json:"machine_id"`
-	Artifact      ArtifactRef `json:"artifact"`
-	UserVolumeIDs []VolumeID  `json:"user_volume_ids,omitempty"`
+	MachineID     MachineID    `json:"machine_id"`
+	Artifact      ArtifactRef  `json:"artifact"`
+	UserVolumeIDs []VolumeID   `json:"user_volume_ids,omitempty"`
+	GuestConfig   *GuestConfig `json:"guest_config,omitempty"`
 }
 
 type CreateMachineResponse struct {

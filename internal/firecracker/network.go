@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -15,6 +16,10 @@ const (
 	defaultNetworkPrefixBits = 30
 	defaultInterfaceID       = "net0"
 	defaultTapPrefix         = "fctap"
+	defaultNFTTableName      = "microagentcomputer"
+	defaultNFTPostrouting    = "postrouting"
+	defaultNFTForward        = "forward"
+	defaultIPForwardPath     = "/proc/sys/net/ipv4/ip_forward"
 )
 
 // NetworkAllocation describes the concrete host-local network values assigned to a machine
@@ -40,7 +45,12 @@ type NetworkProvisioner interface {
 
 // IPTapProvisioner provisions tap devices through the `ip` CLI.
 type IPTapProvisioner struct {
-	runCommand func(context.Context, string, ...string) error
+	guestCIDR         string
+	egressInterface   string
+	runCommand        func(context.Context, string, ...string) error
+	readCommandOutput func(context.Context, string, ...string) (string, error)
+	readFile          func(string) ([]byte, error)
+	writeFile         func(string, []byte, os.FileMode) error
 }
 
 // GuestIP returns the guest IP address.
@@ -143,8 +153,10 @@ func (a *NetworkAllocator) networkForIndex(index int) (NetworkAllocation, error)
 }
 
 // NewIPTapProvisioner returns a provisioner backed by `ip`.
-func NewIPTapProvisioner() *IPTapProvisioner {
+func NewIPTapProvisioner(guestCIDR string, egressInterface string) *IPTapProvisioner {
 	return &IPTapProvisioner{
+		guestCIDR:       strings.TrimSpace(guestCIDR),
+		egressInterface: strings.TrimSpace(egressInterface),
 		runCommand: func(ctx context.Context, name string, args ...string) error {
 			cmd := exec.CommandContext(ctx, name, args...)
 			output, err := cmd.CombinedOutput()
@@ -153,6 +165,16 @@ func NewIPTapProvisioner() *IPTapProvisioner {
 			}
 			return nil
 		},
+		readCommandOutput: func(ctx context.Context, name string, args ...string) (string, error) {
+			cmd := exec.CommandContext(ctx, name, args...)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				return "", fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+			}
+			return string(output), nil
+		},
+		readFile:  os.ReadFile,
+		writeFile: os.WriteFile,
 	}
 }
 
@@ -163,6 +185,9 @@ func (p *IPTapProvisioner) Ensure(ctx context.Context, network NetworkAllocation
 	}
 	if strings.TrimSpace(network.TapName) == "" {
 		return fmt.Errorf("tap name is required")
+	}
+	if err := p.ensureHostNetworking(ctx); err != nil {
+		return err
 	}
 
 	err := p.runCommand(ctx, "ip", "tuntap", "add", "dev", network.TapName, "mode", "tap")
@@ -184,6 +209,92 @@ func (p *IPTapProvisioner) Ensure(ctx context.Context, network NetworkAllocation
 	}
 	if err := p.runCommand(ctx, "ip", "link", "set", "dev", network.TapName, "up"); err != nil {
 		return fmt.Errorf("bring up tap device %q: %w", network.TapName, err)
+	}
+	return nil
+}
+
+func (p *IPTapProvisioner) ensureHostNetworking(ctx context.Context) error {
+	if strings.TrimSpace(p.egressInterface) == "" {
+		return fmt.Errorf("egress interface is required")
+	}
+	if strings.TrimSpace(p.guestCIDR) == "" {
+		return fmt.Errorf("guest cidr is required")
+	}
+	if err := p.runCommand(ctx, "ip", "link", "show", "dev", p.egressInterface); err != nil {
+		return fmt.Errorf("validate egress interface %q: %w", p.egressInterface, err)
+	}
+	if err := p.ensureIPForwarding(); err != nil {
+		return err
+	}
+	if err := p.ensureNFTTable(ctx); err != nil {
+		return err
+	}
+	if err := p.ensureNFTChain(ctx, defaultNFTPostrouting, "{ type nat hook postrouting priority srcnat; policy accept; }"); err != nil {
+		return err
+	}
+	if err := p.ensureNFTChain(ctx, defaultNFTForward, "{ type filter hook forward priority filter; policy accept; }"); err != nil {
+		return err
+	}
+	if err := p.ensureNFTRule(ctx, defaultNFTPostrouting, "microagentcomputer-postrouting", "ip saddr %s oifname %q counter masquerade comment %q", p.guestCIDR, p.egressInterface, "microagentcomputer-postrouting"); err != nil {
+		return err
+	}
+	if err := p.ensureNFTRule(ctx, defaultNFTForward, "microagentcomputer-forward-out", "iifname %q oifname %q counter accept comment %q", defaultTapPrefix+"*", p.egressInterface, "microagentcomputer-forward-out"); err != nil {
+		return err
+	}
+	if err := p.ensureNFTRule(ctx, defaultNFTForward, "microagentcomputer-forward-in", "iifname %q oifname %q ct state related,established counter accept comment %q", p.egressInterface, defaultTapPrefix+"*", "microagentcomputer-forward-in"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *IPTapProvisioner) ensureIPForwarding() error {
+	if p.readFile == nil || p.writeFile == nil {
+		return fmt.Errorf("ip forwarding helpers are required")
+	}
+	payload, err := p.readFile(defaultIPForwardPath)
+	if err != nil {
+		return fmt.Errorf("read ip forwarding state: %w", err)
+	}
+	if strings.TrimSpace(string(payload)) == "1" {
+		return nil
+	}
+	if err := p.writeFile(defaultIPForwardPath, []byte("1\n"), 0o644); err != nil {
+		return fmt.Errorf("enable ip forwarding: %w", err)
+	}
+	return nil
+}
+
+func (p *IPTapProvisioner) ensureNFTTable(ctx context.Context) error {
+	if _, err := p.readCommandOutput(ctx, "nft", "list", "table", "ip", defaultNFTTableName); err == nil {
+		return nil
+	}
+	if err := p.runCommand(ctx, "nft", "add", "table", "ip", defaultNFTTableName); err != nil {
+		return fmt.Errorf("ensure nft table %q: %w", defaultNFTTableName, err)
+	}
+	return nil
+}
+
+func (p *IPTapProvisioner) ensureNFTChain(ctx context.Context, chain string, definition string) error {
+	if _, err := p.readCommandOutput(ctx, "nft", "list", "chain", "ip", defaultNFTTableName, chain); err == nil {
+		return nil
+	}
+	if err := p.runCommand(ctx, "nft", "add", "chain", "ip", defaultNFTTableName, chain, definition); err != nil {
+		return fmt.Errorf("ensure nft chain %q: %w", chain, err)
+	}
+	return nil
+}
+
+func (p *IPTapProvisioner) ensureNFTRule(ctx context.Context, chain string, comment string, format string, args ...any) error {
+	output, err := p.readCommandOutput(ctx, "nft", "list", "chain", "ip", defaultNFTTableName, chain)
+	if err != nil {
+		return fmt.Errorf("list nft chain %q: %w", chain, err)
+	}
+	if strings.Contains(output, fmt.Sprintf("comment \"%s\"", comment)) {
+		return nil
+	}
+	rule := fmt.Sprintf(format, args...)
+	if err := p.runCommand(ctx, "nft", "add", "rule", "ip", defaultNFTTableName, chain, rule); err != nil {
+		return fmt.Errorf("ensure nft rule %q: %w", comment, err)
 	}
 	return nil
 }
