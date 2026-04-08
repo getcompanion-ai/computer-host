@@ -75,7 +75,14 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	}
 
 	kernelPayload := []byte("kernel-image")
-	rootFSPayload := []byte("rootfs-image")
+	rootFSImagePath := filepath.Join(root, "guest-rootfs.ext4")
+	if err := buildTestExt4Image(root, rootFSImagePath); err != nil {
+		t.Fatalf("build ext4 image: %v", err)
+	}
+	rootFSPayload, err := os.ReadFile(rootFSImagePath)
+	if err != nil {
+		t.Fatalf("read ext4 image: %v", err)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/kernel":
@@ -93,6 +100,15 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 		Artifact: contracthost.ArtifactRef{
 			KernelImageURL: server.URL + "/kernel",
 			RootFSURL:      server.URL + "/rootfs",
+		},
+		GuestConfig: &contracthost.GuestConfig{
+			AuthorizedKeys: []string{
+				"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOverrideKey daemon-test",
+			},
+			LoginWebhook: &contracthost.GuestLoginWebhook{
+				URL:         "https://example.com/login",
+				BearerToken: "token",
+			},
 		},
 	})
 	if err != nil {
@@ -123,6 +139,20 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	if _, err := os.Stat(runtime.lastSpec.RootFSPath); err != nil {
 		t.Fatalf("system disk not staged: %v", err)
 	}
+	hostAuthorizedKeyBytes, err := os.ReadFile(hostDaemon.backendSSHPublicKeyPath())
+	if err != nil {
+		t.Fatalf("read backend ssh public key: %v", err)
+	}
+	authorizedKeys, err := readExt4File(runtime.lastSpec.RootFSPath, "/etc/microagent/authorized_keys")
+	if err != nil {
+		t.Fatalf("read injected authorized_keys: %v", err)
+	}
+	if !strings.Contains(authorizedKeys, strings.TrimSpace(string(hostAuthorizedKeyBytes))) {
+		t.Fatalf("authorized_keys missing backend ssh key: %q", authorizedKeys)
+	}
+	if !strings.Contains(authorizedKeys, "daemon-test") {
+		t.Fatalf("authorized_keys missing request override key: %q", authorizedKeys)
+	}
 
 	artifact, err := fileStore.GetArtifact(context.Background(), response.Machine.Artifact)
 	if err != nil {
@@ -151,6 +181,31 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	}
 	if len(operations) != 0 {
 		t.Fatalf("operation journal should be empty after success: got %d entries", len(operations))
+	}
+}
+
+func TestNewEnsuresBackendSSHKeyPair(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	hostDaemon, err := New(cfg, fileStore, &fakeRuntime{})
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+
+	if _, err := os.Stat(hostDaemon.backendSSHPrivateKeyPath()); err != nil {
+		t.Fatalf("stat backend ssh private key: %v", err)
+	}
+	publicKeyPayload, err := os.ReadFile(hostDaemon.backendSSHPublicKeyPath())
+	if err != nil {
+		t.Fatalf("read backend ssh public key: %v", err)
+	}
+	if !strings.HasPrefix(string(publicKeyPayload), "ssh-ed25519 ") {
+		t.Fatalf("unexpected backend ssh public key: %q", string(publicKeyPayload))
 	}
 }
 

@@ -23,6 +23,10 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	if err := validateGuestConfig(req.GuestConfig); err != nil {
 		return nil, err
 	}
+	guestConfig, err := d.mergedGuestConfig(req.GuestConfig)
+	if err != nil {
+		return nil, err
+	}
 
 	unlock := d.lockMachine(req.MachineID)
 	defer unlock()
@@ -73,7 +77,7 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 		_ = os.Remove(systemVolumePath)
 		_ = os.RemoveAll(filepath.Dir(systemVolumePath))
 	}()
-	if err := injectGuestConfig(ctx, systemVolumePath, req.GuestConfig); err != nil {
+	if err := injectGuestConfig(ctx, systemVolumePath, guestConfig); err != nil {
 		return nil, err
 	}
 

@@ -31,6 +31,14 @@ func (d *Daemon) machineRuntimeBaseDir(machineID contracthost.MachineID) string 
 	return filepath.Join(d.config.RuntimeDir, "machines", string(machineID))
 }
 
+func (d *Daemon) backendSSHPrivateKeyPath() string {
+	return filepath.Join(d.config.RootDir, "state", "ssh", "backend_ed25519")
+}
+
+func (d *Daemon) backendSSHPublicKeyPath() string {
+	return d.backendSSHPrivateKeyPath() + ".pub"
+}
+
 func artifactKey(ref contracthost.ArtifactRef) string {
 	sum := sha256.Sum256([]byte(ref.KernelImageURL + "\n" + ref.RootFSURL))
 	return hex.EncodeToString(sum[:])
@@ -179,6 +187,69 @@ func defaultMachinePorts() []contracthost.MachinePort {
 		{Name: contracthost.MachinePortNameSSH, Port: defaultSSHPort, Protocol: contracthost.PortProtocolTCP},
 		{Name: contracthost.MachinePortNameVNC, Port: defaultVNCPort, Protocol: contracthost.PortProtocolTCP},
 	}
+}
+
+func (d *Daemon) ensureBackendSSHKeyPair() error {
+	privateKeyPath := d.backendSSHPrivateKeyPath()
+	publicKeyPath := d.backendSSHPublicKeyPath()
+	if err := os.MkdirAll(filepath.Dir(privateKeyPath), 0o700); err != nil {
+		return fmt.Errorf("create backend ssh dir: %w", err)
+	}
+	privateExists := fileExists(privateKeyPath)
+	publicExists := fileExists(publicKeyPath)
+	switch {
+	case privateExists && publicExists:
+		return nil
+	case privateExists && !publicExists:
+		return d.writeBackendSSHPublicKey(privateKeyPath, publicKeyPath)
+	case !privateExists && publicExists:
+		return fmt.Errorf("backend ssh private key %q is missing while public key exists", privateKeyPath)
+	}
+
+	command := exec.Command("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", privateKeyPath)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("generate backend ssh keypair: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func (d *Daemon) writeBackendSSHPublicKey(privateKeyPath string, publicKeyPath string) error {
+	command := exec.Command("ssh-keygen", "-y", "-f", privateKeyPath)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("derive backend ssh public key: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	payload := strings.TrimSpace(string(output)) + "\n"
+	if err := os.WriteFile(publicKeyPath, []byte(payload), 0o644); err != nil {
+		return fmt.Errorf("write backend ssh public key %q: %w", publicKeyPath, err)
+	}
+	return nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func (d *Daemon) mergedGuestConfig(config *contracthost.GuestConfig) (*contracthost.GuestConfig, error) {
+	hostAuthorizedKey, err := os.ReadFile(d.backendSSHPublicKeyPath())
+	if err != nil {
+		return nil, fmt.Errorf("read backend ssh public key: %w", err)
+	}
+	authorizedKeys := []string{strings.TrimSpace(string(hostAuthorizedKey))}
+	if config != nil {
+		authorizedKeys = append(authorizedKeys, config.AuthorizedKeys...)
+	}
+
+	merged := &contracthost.GuestConfig{
+		AuthorizedKeys: authorizedKeys,
+	}
+	if config != nil && config.LoginWebhook != nil {
+		loginWebhook := *config.LoginWebhook
+		merged.LoginWebhook = &loginWebhook
+	}
+	return merged, nil
 }
 
 func hasGuestConfig(config *contracthost.GuestConfig) bool {

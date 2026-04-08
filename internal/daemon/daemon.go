@@ -56,13 +56,17 @@ func New(cfg appconfig.Config, store store.Store, runtime Runtime) (*Daemon, err
 			return nil, fmt.Errorf("create daemon dir %q: %w", dir, err)
 		}
 	}
-	return &Daemon{
+	daemon := &Daemon{
 		config:        cfg,
 		store:         store,
 		runtime:       runtime,
 		machineLocks:  make(map[contracthost.MachineID]*sync.Mutex),
 		artifactLocks: make(map[string]*sync.Mutex),
-	}, nil
+	}
+	if err := daemon.ensureBackendSSHKeyPair(); err != nil {
+		return nil, err
+	}
+	return daemon, nil
 }
 
 func (d *Daemon) Health(ctx context.Context) (*contracthost.HealthResponse, error) {
