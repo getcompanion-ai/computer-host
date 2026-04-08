@@ -14,6 +14,11 @@ import (
 
 var ErrMachineNotFound = errors.New("machine not found")
 
+var (
+	stopGracePeriod  = 5 * time.Second
+	stopPollInterval = 50 * time.Millisecond
+)
+
 type RuntimeConfig struct {
 	RootDir               string
 	FirecrackerBinaryPath string
@@ -163,12 +168,20 @@ func (r *Runtime) Stop(ctx context.Context, state MachineState) error {
 		return fmt.Errorf("stop machine %q: %w", state.ID, err)
 	}
 
-	ticker := time.NewTicker(50 * time.Millisecond)
+	ticker := time.NewTicker(stopPollInterval)
 	defer ticker.Stop()
+	deadline := time.Now().Add(stopGracePeriod)
+	sentKill := false
 
 	for {
 		if !processExists(state.PID) {
 			return nil
+		}
+		if !sentKill && time.Now().After(deadline) {
+			if err := process.Signal(syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				return fmt.Errorf("kill machine %q: %w", state.ID, err)
+			}
+			sentKill = true
 		}
 		select {
 		case <-ctx.Done():
@@ -205,6 +218,13 @@ func (r *Runtime) Delete(ctx context.Context, state MachineState) error {
 func processExists(pid int) bool {
 	if pid < 1 {
 		return false
+	}
+	if payload, err := os.ReadFile(filepath.Join("/proc", fmt.Sprintf("%d", pid), "stat")); err == nil {
+		if marker := strings.LastIndexByte(string(payload), ')'); marker >= 0 && marker+2 < len(payload) {
+			if payload[marker+2] == 'Z' {
+				return false
+			}
+		}
 	}
 	err := syscall.Kill(pid, 0)
 	return err == nil || err == syscall.EPERM
