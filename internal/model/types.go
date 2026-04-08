@@ -27,8 +27,10 @@ type MachineRecord struct {
 	Artifact       contracthost.ArtifactRef
 	SystemVolumeID contracthost.VolumeID
 	UserVolumeIDs  []contracthost.VolumeID
-	Phase          contracthost.MachinePhase
 	RuntimeHost    string
+	TapDevice      string
+	Ports          []contracthost.MachinePort
+	Phase          contracthost.MachinePhase
 	Error          string
 	CreatedAt      time.Time
 	StartedAt      *time.Time
