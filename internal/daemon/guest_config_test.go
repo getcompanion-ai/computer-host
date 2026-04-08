@@ -58,6 +58,42 @@ func TestInjectGuestConfigWritesAuthorizedKeysAndWebhook(t *testing.T) {
 	}
 }
 
+func TestInjectMachineIdentityWritesHostnameFiles(t *testing.T) {
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "rootfs.ext4")
+	if err := buildTestExt4Image(root, imagePath); err != nil {
+		t.Fatalf("build ext4 image: %v", err)
+	}
+
+	if err := injectMachineIdentity(context.Background(), imagePath, "kiruru"); err != nil {
+		t.Fatalf("inject machine identity: %v", err)
+	}
+
+	machineName, err := readExt4File(imagePath, "/etc/microagent/machine-name")
+	if err != nil {
+		t.Fatalf("read machine-name: %v", err)
+	}
+	if machineName != "kiruru\n" {
+		t.Fatalf("machine-name mismatch: got %q want %q", machineName, "kiruru\n")
+	}
+
+	hostname, err := readExt4File(imagePath, "/etc/hostname")
+	if err != nil {
+		t.Fatalf("read hostname: %v", err)
+	}
+	if hostname != "kiruru\n" {
+		t.Fatalf("hostname mismatch: got %q want %q", hostname, "kiruru\n")
+	}
+
+	hosts, err := readExt4File(imagePath, "/etc/hosts")
+	if err != nil {
+		t.Fatalf("read hosts: %v", err)
+	}
+	if !strings.Contains(hosts, "127.0.1.1 kiruru") {
+		t.Fatalf("hosts missing machine name: %q", hosts)
+	}
+}
+
 func buildTestExt4Image(root string, imagePath string) error {
 	sourceDir := filepath.Join(root, "source")
 	if err := os.MkdirAll(filepath.Join(sourceDir, "etc", "microagent"), 0o755); err != nil {

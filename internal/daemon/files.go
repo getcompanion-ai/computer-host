@@ -296,6 +296,41 @@ func injectGuestConfig(ctx context.Context, imagePath string, config *contractho
 	return nil
 }
 
+func injectMachineIdentity(ctx context.Context, imagePath string, machineID contracthost.MachineID) error {
+	machineName := strings.TrimSpace(string(machineID))
+	if machineName == "" {
+		return fmt.Errorf("machine_id is required")
+	}
+
+	stagingDir, err := os.MkdirTemp(filepath.Dir(imagePath), "machine-identity-*")
+	if err != nil {
+		return fmt.Errorf("create machine identity staging dir: %w", err)
+	}
+	defer os.RemoveAll(stagingDir)
+
+	identityFiles := map[string]string{
+		"/etc/microagent/machine-name": machineName + "\n",
+		"/etc/hostname":                machineName + "\n",
+		"/etc/hosts": fmt.Sprintf(
+			"127.0.0.1 localhost\n127.0.1.1 %s\n::1 localhost ip6-localhost ip6-loopback\nff02::1 ip6-allnodes\nff02::2 ip6-allrouters\n",
+			machineName,
+		),
+	}
+
+	for targetPath, payload := range identityFiles {
+		sourceName := strings.TrimPrefix(strings.ReplaceAll(targetPath, "/", "_"), "_")
+		sourcePath := filepath.Join(stagingDir, sourceName)
+		if err := os.WriteFile(sourcePath, []byte(payload), 0o644); err != nil {
+			return fmt.Errorf("write machine identity staging file for %q: %w", targetPath, err)
+		}
+		if err := replaceExt4File(ctx, imagePath, sourcePath, targetPath); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func replaceExt4File(ctx context.Context, imagePath string, sourcePath string, targetPath string) error {
 	_ = runDebugFS(ctx, imagePath, fmt.Sprintf("rm %s", targetPath))
 	if err := runDebugFS(ctx, imagePath, fmt.Sprintf("write %s %s", sourcePath, targetPath)); err != nil {

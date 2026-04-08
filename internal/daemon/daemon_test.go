@@ -153,6 +153,20 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	if !strings.Contains(authorizedKeys, "daemon-test") {
 		t.Fatalf("authorized_keys missing request override key: %q", authorizedKeys)
 	}
+	machineName, err := readExt4File(runtime.lastSpec.RootFSPath, "/etc/microagent/machine-name")
+	if err != nil {
+		t.Fatalf("read injected machine-name: %v", err)
+	}
+	if machineName != "vm-1\n" {
+		t.Fatalf("machine-name mismatch: got %q want %q", machineName, "vm-1\n")
+	}
+	hosts, err := readExt4File(runtime.lastSpec.RootFSPath, "/etc/hosts")
+	if err != nil {
+		t.Fatalf("read injected hosts: %v", err)
+	}
+	if !strings.Contains(hosts, "127.0.1.1 vm-1") {
+		t.Fatalf("hosts missing machine identity: %q", hosts)
+	}
 
 	artifact, err := fileStore.GetArtifact(context.Background(), response.Machine.Artifact)
 	if err != nil {

@@ -80,6 +80,9 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	if err := injectGuestConfig(ctx, systemVolumePath, guestConfig); err != nil {
 		return nil, err
 	}
+	if err := injectMachineIdentity(ctx, systemVolumePath, req.MachineID); err != nil {
+		return nil, err
+	}
 
 	spec, err := d.buildMachineSpec(req.MachineID, artifact, userVolumes, systemVolumePath)
 	if err != nil {
