@@ -5,25 +5,22 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
-
-	sdk "github.com/firecracker-microvm/firecracker-go-sdk"
 )
 
-// ErrMachineNotFound is returned when the runtime does not know a machine ID.
 var ErrMachineNotFound = errors.New("machine not found")
 
-// RuntimeConfig configures the host-local Firecracker runtime wrapper.
 type RuntimeConfig struct {
 	RootDir               string
 	FirecrackerBinaryPath string
 	JailerBinaryPath      string
 }
 
-// Runtime manages local Firecracker machines on a single host.
 type Runtime struct {
 	rootDir               string
 	firecrackerBinaryPath string
@@ -36,20 +33,21 @@ type Runtime struct {
 }
 
 type managedMachine struct {
-	spec    MachineSpec
-	network NetworkAllocation
-	paths   machinePaths
-	machine *sdk.Machine
-	state   MachineState
+	cmd      *exec.Cmd
+	entered  bool
+	exited   chan struct{}
+	network  NetworkAllocation
+	paths    machinePaths
+	spec     MachineSpec
+	state    MachineState
+	stopping bool
 }
 
 const (
 	defaultVSockCIDStart = uint32(3)
-	defaultVSockDirName  = "vsock"
 	defaultVSockID       = "vsock0"
 )
 
-// NewRuntime creates a new host-local Firecracker runtime wrapper.
 func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	rootDir := filepath.Clean(strings.TrimSpace(cfg.RootDir))
 	if rootDir == "." || rootDir == "" {
@@ -69,9 +67,6 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	if err := os.MkdirAll(rootDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create runtime root dir %q: %w", rootDir, err)
 	}
-	if err := os.MkdirAll(filepath.Join(rootDir, defaultVSockDirName), 0o755); err != nil {
-		return nil, fmt.Errorf("create runtime vsock dir: %w", err)
-	}
 
 	allocator, err := NewNetworkAllocator(defaultNetworkCIDR)
 	if err != nil {
@@ -88,7 +83,6 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	}, nil
 }
 
-// Boot provisions host resources and starts a new jailed Firecracker process.
 func (r *Runtime) Boot(ctx context.Context, spec MachineSpec) (*MachineState, error) {
 	if err := spec.Validate(); err != nil {
 		return nil, err
@@ -124,12 +118,14 @@ func (r *Runtime) Boot(ctx context.Context, spec MachineSpec) (*MachineState, er
 			ID:    spec.ID,
 			Phase: PhaseProvisioning,
 		},
+		entered: true,
 	}
 	r.mu.Unlock()
 
-	cleanup := func(network NetworkAllocation, paths machinePaths) {
+	cleanup := func(network NetworkAllocation, paths machinePaths, command *exec.Cmd) {
+		cleanupStartedProcess(command)
 		_ = r.networkProvisioner.Remove(context.Background(), network)
-		_ = removeIfExists(vsockPath(spec))
+		_ = removeIfExists(hostVSockPath(paths, spec))
 		if paths.BaseDir != "" {
 			_ = os.RemoveAll(paths.BaseDir)
 		}
@@ -140,67 +136,77 @@ func (r *Runtime) Boot(ctx context.Context, spec MachineSpec) (*MachineState, er
 
 	network, err := r.networkAllocator.Allocate(usedNetworks)
 	if err != nil {
-		cleanup(NetworkAllocation{}, machinePaths{})
+		cleanup(NetworkAllocation{}, machinePaths{}, nil)
 		return nil, err
 	}
 
 	paths, err := buildMachinePaths(r.rootDir, spec.ID, r.firecrackerBinaryPath)
 	if err != nil {
-		cleanup(network, machinePaths{})
+		cleanup(network, machinePaths{}, nil)
 		return nil, err
 	}
 	if err := os.MkdirAll(paths.JailerBaseDir, 0o755); err != nil {
-		cleanup(network, paths)
+		cleanup(network, paths, nil)
 		return nil, fmt.Errorf("create machine jailer dir %q: %w", paths.JailerBaseDir, err)
 	}
 	if err := r.networkProvisioner.Ensure(ctx, network); err != nil {
-		cleanup(network, paths)
+		cleanup(network, paths, nil)
 		return nil, err
 	}
 
-	cfg, err := buildSDKConfig(spec, paths, network, r.firecrackerBinaryPath, r.jailerBinaryPath)
+	command, err := launchJailedFirecracker(paths, spec.ID, r.firecrackerBinaryPath, r.jailerBinaryPath)
 	if err != nil {
-		cleanup(network, paths)
+		cleanup(network, paths, nil)
 		return nil, err
 	}
 
-	machine, err := sdk.NewMachine(ctx, cfg)
-	if err != nil {
-		cleanup(network, paths)
-		return nil, fmt.Errorf("create firecracker machine: %w", err)
-	}
-	if err := machine.Start(ctx); err != nil {
-		cleanup(network, paths)
-		return nil, fmt.Errorf("start firecracker machine: %w", err)
+	client := newAPIClient(paths.SocketPath)
+	if err := waitForSocket(ctx, client, paths.SocketPath); err != nil {
+		cleanup(network, paths, command)
+		return nil, fmt.Errorf("wait for firecracker socket: %w", err)
 	}
 
-	pid, _ := machine.PID()
+	jailedSpec, err := stageMachineFiles(spec, paths)
+	if err != nil {
+		cleanup(network, paths, command)
+		return nil, err
+	}
+	if err := configureMachine(ctx, client, jailedSpec, network); err != nil {
+		cleanup(network, paths, command)
+		return nil, err
+	}
+
+	pid := 0
+	if command.Process != nil {
+		pid = command.Process.Pid
+	}
+
 	now := time.Now().UTC()
 	state := MachineState{
 		ID:          spec.ID,
 		Phase:       PhaseRunning,
 		PID:         pid,
 		RuntimeHost: network.GuestIP().String(),
-		SocketPath:  machine.Cfg.SocketPath,
+		SocketPath:  paths.SocketPath,
 		TapName:     network.TapName,
 		StartedAt:   &now,
 	}
 
 	r.mu.Lock()
 	entry := r.machines[spec.ID]
+	entry.cmd = command
+	entry.exited = make(chan struct{})
 	entry.network = network
 	entry.paths = paths
-	entry.machine = machine
 	entry.state = state
 	r.mu.Unlock()
 
-	go r.watchMachine(spec.ID, machine)
+	go r.watchMachine(spec.ID, command, entry.exited)
 
 	out := state
 	return &out, nil
 }
 
-// Inspect returns the currently known state for a machine.
 func (r *Runtime) Inspect(id MachineID) (*MachineState, error) {
 	r.mu.RLock()
 	entry, ok := r.machines[id]
@@ -210,22 +216,13 @@ func (r *Runtime) Inspect(id MachineID) (*MachineState, error) {
 	}
 
 	state := entry.state
-	if entry.machine != nil {
-		pid, err := entry.machine.PID()
-		if err != nil {
-			if state.Phase == PhaseRunning {
-				state.Phase = PhaseStopped
-				state.PID = 0
-			}
-		} else {
-			state.PID = pid
-		}
+	if state.PID > 0 && !processExists(state.PID) {
+		state.Phase = PhaseStopped
+		state.PID = 0
 	}
-
 	return &state, nil
 }
 
-// Stop terminates a running Firecracker process and updates local state.
 func (r *Runtime) Stop(ctx context.Context, id MachineID) error {
 	r.mu.RLock()
 	entry, ok := r.machines[id]
@@ -233,34 +230,31 @@ func (r *Runtime) Stop(ctx context.Context, id MachineID) error {
 	if !ok || entry == nil {
 		return ErrMachineNotFound
 	}
-	if entry.machine == nil {
+	if entry.cmd == nil || entry.cmd.Process == nil {
 		return fmt.Errorf("machine %q has no firecracker process", id)
 	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- entry.machine.StopVMM()
-	}()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			return fmt.Errorf("stop machine %q: %w", id, err)
-		}
-	case <-ctx.Done():
-		return ctx.Err()
+	if entry.state.Phase == PhaseStopped {
+		return nil
 	}
 
 	r.mu.Lock()
-	entry.state.Phase = PhaseStopped
-	entry.state.PID = 0
-	entry.state.Error = ""
+	entry.stopping = true
+	process := entry.cmd.Process
+	exited := entry.exited
 	r.mu.Unlock()
 
-	return nil
+	if err := process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("stop machine %q: %w", id, err)
+	}
+
+	select {
+	case <-exited:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
-// Delete stops a machine if necessary and removes its local resources.
 func (r *Runtime) Delete(ctx context.Context, id MachineID) error {
 	r.mu.RLock()
 	entry, ok := r.machines[id]
@@ -269,7 +263,7 @@ func (r *Runtime) Delete(ctx context.Context, id MachineID) error {
 		return ErrMachineNotFound
 	}
 
-	if entry.machine != nil {
+	if entry.state.Phase == PhaseRunning {
 		if err := r.Stop(ctx, id); err != nil && !errors.Is(err, context.Canceled) {
 			return err
 		}
@@ -277,7 +271,7 @@ func (r *Runtime) Delete(ctx context.Context, id MachineID) error {
 	if err := r.networkProvisioner.Remove(ctx, entry.network); err != nil {
 		return err
 	}
-	if err := removeIfExists(vsockPath(entry.spec)); err != nil {
+	if err := removeIfExists(hostVSockPath(entry.paths, entry.spec)); err != nil {
 		return err
 	}
 	if err := os.RemoveAll(entry.paths.BaseDir); err != nil {
@@ -290,27 +284,32 @@ func (r *Runtime) Delete(ctx context.Context, id MachineID) error {
 	return nil
 }
 
-func (r *Runtime) watchMachine(id MachineID, machine *sdk.Machine) {
-	err := machine.Wait(context.Background())
+func (r *Runtime) watchMachine(id MachineID, command *exec.Cmd, exited chan struct{}) {
+	err := command.Wait()
+	close(exited)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	entry, ok := r.machines[id]
-	if !ok || entry == nil || entry.machine != machine {
+	if !ok || entry == nil || entry.cmd != command {
 		return
 	}
 
 	entry.state.PID = 0
+	if entry.stopping {
+		entry.state.Phase = PhaseStopped
+		entry.state.Error = ""
+		entry.stopping = false
+		return
+	}
 	if err != nil {
 		entry.state.Phase = PhaseError
 		entry.state.Error = err.Error()
 		return
 	}
 
-	if entry.state.Phase != PhaseStopped {
-		entry.state.Phase = PhaseStopped
-	}
+	entry.state.Phase = PhaseStopped
 	entry.state.Error = ""
 }
 
@@ -330,7 +329,7 @@ func (r *Runtime) resolveVSock(spec MachineSpec, used map[uint32]struct{}) (Mach
 	spec.Vsock = &VsockSpec{
 		ID:   defaultVSockID,
 		CID:  cid,
-		Path: filepath.Join(r.rootDir, defaultVSockDirName, string(spec.ID)+".sock"),
+		Path: string(spec.ID) + ".sock",
 	}
 	return spec, nil
 }
@@ -344,11 +343,12 @@ func nextVSockCID(used map[uint32]struct{}) (uint32, error) {
 	return 0, fmt.Errorf("vsock cid space exhausted")
 }
 
-func vsockPath(spec MachineSpec) string {
-	if spec.Vsock == nil {
-		return ""
+func processExists(pid int) bool {
+	if pid < 1 {
+		return false
 	}
-	return strings.TrimSpace(spec.Vsock.Path)
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
 }
 
 func removeIfExists(path string) error {

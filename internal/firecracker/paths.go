@@ -6,15 +6,18 @@ import (
 	"strings"
 )
 
-const defaultSocketName = "api.socket"
+const (
+	defaultChrootRootDirName     = "root"
+	defaultFirecrackerSocketDir  = "run"
+	defaultFirecrackerSocketName = "firecracker.socket"
+	defaultFirecrackerSocketPath = "/run/firecracker.socket"
+)
 
 type machinePaths struct {
-	BaseDir        string
-	JailerBaseDir  string
-	ChrootRootDir  string
-	SocketName     string
-	SocketPath     string
-	FirecrackerBin string
+	BaseDir       string
+	ChrootRootDir string
+	JailerBaseDir string
+	SocketPath    string
 }
 
 func buildMachinePaths(rootDir string, id MachineID, firecrackerBinaryPath string) (machinePaths, error) {
@@ -25,6 +28,7 @@ func buildMachinePaths(rootDir string, id MachineID, firecrackerBinaryPath strin
 	if strings.TrimSpace(string(id)) == "" {
 		return machinePaths{}, fmt.Errorf("machine id is required")
 	}
+
 	binName := filepath.Base(strings.TrimSpace(firecrackerBinaryPath))
 	if binName == "." || binName == string(filepath.Separator) || binName == "" {
 		return machinePaths{}, fmt.Errorf("firecracker binary path is required")
@@ -32,14 +36,12 @@ func buildMachinePaths(rootDir string, id MachineID, firecrackerBinaryPath strin
 
 	baseDir := filepath.Join(rootDir, "machines", string(id))
 	jailerBaseDir := filepath.Join(baseDir, "jailer")
-	chrootRootDir := filepath.Join(jailerBaseDir, binName, string(id), "root")
+	chrootRootDir := filepath.Join(jailerBaseDir, binName, string(id), defaultChrootRootDirName)
 
 	return machinePaths{
-		BaseDir:        baseDir,
-		JailerBaseDir:  jailerBaseDir,
-		ChrootRootDir:  chrootRootDir,
-		SocketName:     defaultSocketName,
-		SocketPath:     filepath.Join(chrootRootDir, defaultSocketName),
-		FirecrackerBin: binName,
+		BaseDir:       baseDir,
+		ChrootRootDir: chrootRootDir,
+		JailerBaseDir: jailerBaseDir,
+		SocketPath:    filepath.Join(chrootRootDir, defaultFirecrackerSocketDir, defaultFirecrackerSocketName),
 	}, nil
 }

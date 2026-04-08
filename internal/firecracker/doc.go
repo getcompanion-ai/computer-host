@@ -1,4 +1,2 @@
-// the Firecracker Go SDK for microagentcomputer.
-// its supposed to be very thin and the main point is to abstract jailer away and build new
-// primitives for agentcomputer
+// Package firecracker contains the thin host-local Firecracker integration for microagentcomputer.
 package firecracker

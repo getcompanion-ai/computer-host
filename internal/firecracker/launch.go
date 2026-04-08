@@ -1,0 +1,203 @@
+package firecracker
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	defaultCgroupVersion           = "2"
+	defaultFirecrackerInitTimeout  = 3 * time.Second
+	defaultFirecrackerPollInterval = 10 * time.Millisecond
+	defaultRootDriveID             = "root_drive"
+	defaultVSockRunDir             = "/run"
+)
+
+func configureMachine(ctx context.Context, client *apiClient, spec MachineSpec, network NetworkAllocation) error {
+	if err := client.PutMachineConfig(ctx, spec); err != nil {
+		return fmt.Errorf("put machine config: %w", err)
+	}
+	if err := client.PutBootSource(ctx, spec); err != nil {
+		return fmt.Errorf("put boot source: %w", err)
+	}
+	for _, drive := range additionalDriveRequests(spec) {
+		if err := client.PutDrive(ctx, drive); err != nil {
+			return fmt.Errorf("put drive %q: %w", drive.DriveID, err)
+		}
+	}
+	if err := client.PutDrive(ctx, rootDriveRequest(spec)); err != nil {
+		return fmt.Errorf("put root drive: %w", err)
+	}
+	if err := client.PutNetworkInterface(ctx, network); err != nil {
+		return fmt.Errorf("put network interface: %w", err)
+	}
+	if spec.Vsock != nil {
+		if err := client.PutVsock(ctx, *spec.Vsock); err != nil {
+			return fmt.Errorf("put vsock: %w", err)
+		}
+	}
+	if err := client.PutAction(ctx, defaultStartAction); err != nil {
+		return fmt.Errorf("start instance: %w", err)
+	}
+	return nil
+}
+
+func launchJailedFirecracker(paths machinePaths, machineID MachineID, firecrackerBinaryPath string, jailerBinaryPath string) (*exec.Cmd, error) {
+	command := exec.Command(
+		jailerBinaryPath,
+		"--id", string(machineID),
+		"--uid", strconv.Itoa(os.Getuid()),
+		"--gid", strconv.Itoa(os.Getgid()),
+		"--exec-file", firecrackerBinaryPath,
+		"--cgroup-version", defaultCgroupVersion,
+		"--chroot-base-dir", paths.JailerBaseDir,
+		"--",
+		"--api-sock", defaultFirecrackerSocketPath,
+	)
+	command.Stdout = os.Stderr
+	command.Stderr = os.Stderr
+	if err := command.Start(); err != nil {
+		return nil, fmt.Errorf("start jailer: %w", err)
+	}
+	return command, nil
+}
+
+func stageMachineFiles(spec MachineSpec, paths machinePaths) (MachineSpec, error) {
+	staged := spec
+
+	kernelImagePath, err := stagedFileName(spec.KernelImagePath)
+	if err != nil {
+		return MachineSpec{}, fmt.Errorf("kernel image path: %w", err)
+	}
+	if err := linkMachineFile(spec.KernelImagePath, filepath.Join(paths.ChrootRootDir, kernelImagePath)); err != nil {
+		return MachineSpec{}, fmt.Errorf("link kernel image into jail: %w", err)
+	}
+	staged.KernelImagePath = kernelImagePath
+
+	rootFSPath, err := stagedFileName(spec.RootFSPath)
+	if err != nil {
+		return MachineSpec{}, fmt.Errorf("rootfs path: %w", err)
+	}
+	if err := linkMachineFile(spec.RootFSPath, filepath.Join(paths.ChrootRootDir, rootFSPath)); err != nil {
+		return MachineSpec{}, fmt.Errorf("link rootfs into jail: %w", err)
+	}
+	staged.RootFSPath = rootFSPath
+
+	staged.Drives = make([]DriveSpec, len(spec.Drives))
+	for i, drive := range spec.Drives {
+		stagedDrive := drive
+		stagedDrivePath, err := stagedFileName(drive.Path)
+		if err != nil {
+			return MachineSpec{}, fmt.Errorf("drive %q path: %w", drive.ID, err)
+		}
+		if err := linkMachineFile(drive.Path, filepath.Join(paths.ChrootRootDir, stagedDrivePath)); err != nil {
+			return MachineSpec{}, fmt.Errorf("link drive %q into jail: %w", drive.ID, err)
+		}
+		stagedDrive.Path = stagedDrivePath
+		staged.Drives[i] = stagedDrive
+	}
+
+	if spec.Vsock != nil {
+		vsock := *spec.Vsock
+		vsock.Path = jailedVSockPath(spec)
+		staged.Vsock = &vsock
+	}
+
+	return staged, nil
+}
+
+func waitForSocket(ctx context.Context, client *apiClient, socketPath string) error {
+	waitContext, cancel := context.WithTimeout(ctx, defaultFirecrackerInitTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(defaultFirecrackerPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-waitContext.Done():
+			return waitContext.Err()
+		case <-ticker.C:
+			if _, err := os.Stat(socketPath); err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return fmt.Errorf("stat socket %q: %w", socketPath, err)
+			}
+			if err := client.Ping(waitContext); err != nil {
+				continue
+			}
+			return nil
+		}
+	}
+}
+
+func additionalDriveRequests(spec MachineSpec) []driveRequest {
+	requests := make([]driveRequest, 0, len(spec.Drives))
+	for _, drive := range spec.Drives {
+		requests = append(requests, driveRequest{
+			DriveID:      drive.ID,
+			IsReadOnly:   drive.ReadOnly,
+			IsRootDevice: false,
+			PathOnHost:   drive.Path,
+		})
+	}
+	return requests
+}
+
+func cleanupStartedProcess(command *exec.Cmd) {
+	if command == nil || command.Process == nil {
+		return
+	}
+	_ = command.Process.Kill()
+	_ = command.Wait()
+}
+
+func hostVSockPath(paths machinePaths, spec MachineSpec) string {
+	if spec.Vsock == nil {
+		return ""
+	}
+	return filepath.Join(paths.ChrootRootDir, defaultFirecrackerSocketDir, filepath.Base(strings.TrimSpace(spec.Vsock.Path)))
+}
+
+func jailedVSockPath(spec MachineSpec) string {
+	if spec.Vsock == nil {
+		return ""
+	}
+	return path.Join(defaultVSockRunDir, filepath.Base(strings.TrimSpace(spec.Vsock.Path)))
+}
+
+func linkMachineFile(source string, target string) error {
+	resolvedSource, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		return err
+	}
+	if err := os.Link(resolvedSource, target); err != nil {
+		return err
+	}
+	return nil
+}
+
+func rootDriveRequest(spec MachineSpec) driveRequest {
+	return driveRequest{
+		DriveID:      defaultRootDriveID,
+		IsReadOnly:   false,
+		IsRootDevice: true,
+		PathOnHost:   spec.RootFSPath,
+	}
+}
+
+func stagedFileName(filePath string) (string, error) {
+	name := filepath.Base(strings.TrimSpace(filePath))
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		return "", fmt.Errorf("file path is required")
+	}
+	return name, nil
+}
