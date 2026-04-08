@@ -15,12 +15,13 @@ import (
 const (
 	defaultCgroupVersion           = "2"
 	defaultFirecrackerInitTimeout  = 10 * time.Second
+	defaultFirecrackerLogLevel     = "Warning"
 	defaultFirecrackerPollInterval = 10 * time.Millisecond
 	defaultRootDriveID             = "root_drive"
 	defaultVSockRunDir             = "/run"
 )
 
-func configureMachine(ctx context.Context, client *apiClient, spec MachineSpec, network NetworkAllocation) error {
+func configureMachine(ctx context.Context, client *apiClient, paths machinePaths, spec MachineSpec, network NetworkAllocation) error {
 	if err := client.PutMachineConfig(ctx, spec); err != nil {
 		return fmt.Errorf("put machine config: %w", err)
 	}
@@ -37,6 +38,12 @@ func configureMachine(ctx context.Context, client *apiClient, spec MachineSpec, 
 	}
 	if err := client.PutNetworkInterface(ctx, network); err != nil {
 		return fmt.Errorf("put network interface: %w", err)
+	}
+	if err := client.PutEntropy(ctx); err != nil {
+		return fmt.Errorf("put entropy device: %w", err)
+	}
+	if err := client.PutSerial(ctx, paths.JailedSerialLogPath); err != nil {
+		return fmt.Errorf("put serial device: %w", err)
 	}
 	if spec.Vsock != nil {
 		if err := client.PutVsock(ctx, *spec.Vsock); err != nil {
@@ -58,14 +65,21 @@ func launchJailedFirecracker(paths machinePaths, machineID MachineID, firecracke
 		"--exec-file", firecrackerBinaryPath,
 		"--cgroup-version", defaultCgroupVersion,
 		"--chroot-base-dir", paths.JailerBaseDir,
+		"--daemonize",
+		"--new-pid-ns",
 		"--",
 		"--api-sock", defaultFirecrackerSocketPath,
+		"--log-path", paths.JailedFirecrackerLogPath,
+		"--level", defaultFirecrackerLogLevel,
+		"--show-level",
+		"--show-log-origin",
 	)
-	command.Stdout = os.Stderr
-	command.Stderr = os.Stderr
 	if err := command.Start(); err != nil {
 		return nil, fmt.Errorf("start jailer: %w", err)
 	}
+	go func() {
+		_ = command.Wait()
+	}()
 	return command, nil
 }
 
@@ -171,7 +185,50 @@ func cleanupStartedProcess(command *exec.Cmd) {
 		return
 	}
 	_ = command.Process.Kill()
-	_ = command.Wait()
+}
+
+func readPIDFile(pidFilePath string) (int, error) {
+	payload, err := os.ReadFile(pidFilePath)
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(payload)))
+	if err != nil {
+		return 0, fmt.Errorf("parse pid file %q: %w", pidFilePath, err)
+	}
+	if pid < 1 {
+		return 0, fmt.Errorf("pid file %q must contain a positive pid", pidFilePath)
+	}
+	return pid, nil
+}
+
+func waitForPIDFile(ctx context.Context, pidFilePath string) (int, error) {
+	waitContext, cancel := context.WithTimeout(ctx, defaultFirecrackerInitTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(defaultFirecrackerPollInterval)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		select {
+		case <-waitContext.Done():
+			if lastErr != nil {
+				return 0, fmt.Errorf("%w (pid_file=%q last_err=%v)", waitContext.Err(), pidFilePath, lastErr)
+			}
+			return 0, fmt.Errorf("%w (pid_file=%q)", waitContext.Err(), pidFilePath)
+		case <-ticker.C:
+			pid, err := readPIDFile(pidFilePath)
+			if err == nil {
+				return pid, nil
+			}
+			lastErr = err
+			if os.IsNotExist(err) {
+				continue
+			}
+			return 0, err
+		}
+	}
 }
 
 func hostVSockPath(paths machinePaths, spec MachineSpec) string {

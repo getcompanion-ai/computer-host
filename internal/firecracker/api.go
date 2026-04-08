@@ -33,6 +33,8 @@ type driveRequest struct {
 	PathOnHost   string `json:"path_on_host"`
 }
 
+type entropyRequest struct{}
+
 type faultResponse struct {
 	FaultMessage string `json:"fault_message"`
 }
@@ -54,6 +56,10 @@ type networkInterfaceRequest struct {
 	GuestMAC    string `json:"guest_mac,omitempty"`
 	HostDevName string `json:"host_dev_name"`
 	IfaceID     string `json:"iface_id"`
+}
+
+type serialRequest struct {
+	SerialOutPath string `json:"serial_out_path"`
 }
 
 type vsockRequest struct {
@@ -98,6 +104,10 @@ func (c *apiClient) PutDrive(ctx context.Context, drive driveRequest) error {
 	return c.do(ctx, http.MethodPut, endpoint, drive, nil, http.StatusNoContent)
 }
 
+func (c *apiClient) PutEntropy(ctx context.Context) error {
+	return c.do(ctx, http.MethodPut, "/entropy", entropyRequest{}, nil, http.StatusNoContent)
+}
+
 func (c *apiClient) PutMachineConfig(ctx context.Context, spec MachineSpec) error {
 	body := machineConfigRequest{
 		MemSizeMib: spec.MemoryMiB,
@@ -115,6 +125,17 @@ func (c *apiClient) PutNetworkInterface(ctx context.Context, network NetworkAllo
 	}
 	endpoint := "/network-interfaces/" + url.PathEscape(network.InterfaceID)
 	return c.do(ctx, http.MethodPut, endpoint, body, nil, http.StatusNoContent)
+}
+
+func (c *apiClient) PutSerial(ctx context.Context, serialOutPath string) error {
+	return c.do(
+		ctx,
+		http.MethodPut,
+		"/serial",
+		serialRequest{SerialOutPath: serialOutPath},
+		nil,
+		http.StatusNoContent,
+	)
 }
 
 func (c *apiClient) PutVsock(ctx context.Context, spec VsockSpec) error {

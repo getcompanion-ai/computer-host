@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
@@ -13,12 +14,15 @@ import (
 )
 
 const (
-	defaultGuestKernelArgs = "console=ttyS0 reboot=k panic=1 pci=off"
-	defaultGuestMemoryMiB  = int64(512)
-	defaultGuestVCPUs      = int64(1)
-	defaultSSHPort         = uint16(2222)
-	defaultVNCPort         = uint16(6080)
-	defaultCopyBufferSize  = 1024 * 1024
+	defaultGuestKernelArgs        = "console=ttyS0 reboot=k panic=1 pci=off"
+	defaultGuestMemoryMiB         = int64(512)
+	defaultGuestVCPUs             = int64(1)
+	defaultSSHPort                = uint16(2222)
+	defaultVNCPort                = uint16(6080)
+	defaultCopyBufferSize         = 1024 * 1024
+	defaultGuestDialTimeout       = 500 * time.Millisecond
+	defaultGuestReadyPollInterval = 100 * time.Millisecond
+	defaultGuestReadyTimeout      = 30 * time.Second
 )
 
 type Runtime interface {

@@ -2,6 +2,7 @@ package firecracker
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -9,16 +10,25 @@ import (
 
 const (
 	defaultChrootRootDirName     = "root"
+	defaultLogDirName            = "logs"
+	defaultSerialLogName         = "serial.log"
 	defaultFirecrackerSocketDir  = "run"
+	defaultFirecrackerLogName    = "firecracker.log"
 	defaultFirecrackerSocketName = "firecracker.socket"
 	defaultFirecrackerSocketPath = "/run/firecracker.socket"
 )
 
 type machinePaths struct {
-	BaseDir       string
-	ChrootRootDir string
-	JailerBaseDir string
-	SocketPath    string
+	BaseDir                  string
+	ChrootRootDir            string
+	JailerBaseDir            string
+	LogDir                   string
+	FirecrackerLogPath       string
+	JailedFirecrackerLogPath string
+	SerialLogPath            string
+	JailedSerialLogPath      string
+	PIDFilePath              string
+	SocketPath               string
 }
 
 func buildMachinePaths(rootDir string, id MachineID, firecrackerBinaryPath string) (machinePaths, error) {
@@ -38,12 +48,19 @@ func buildMachinePaths(rootDir string, id MachineID, firecrackerBinaryPath strin
 	baseDir := filepath.Join(rootDir, "machines", string(id))
 	jailerBaseDir := filepath.Join(baseDir, "jailer")
 	chrootRootDir := filepath.Join(jailerBaseDir, binName, string(id), defaultChrootRootDirName)
+	logDir := filepath.Join(chrootRootDir, defaultLogDirName)
 
 	return machinePaths{
-		BaseDir:       baseDir,
-		ChrootRootDir: chrootRootDir,
-		JailerBaseDir: jailerBaseDir,
-		SocketPath:    filepath.Join(chrootRootDir, defaultFirecrackerSocketDir, defaultFirecrackerSocketName),
+		BaseDir:                  baseDir,
+		ChrootRootDir:            chrootRootDir,
+		JailerBaseDir:            jailerBaseDir,
+		LogDir:                   logDir,
+		FirecrackerLogPath:       filepath.Join(logDir, defaultFirecrackerLogName),
+		JailedFirecrackerLogPath: path.Join("/", defaultLogDirName, defaultFirecrackerLogName),
+		SerialLogPath:            filepath.Join(logDir, defaultSerialLogName),
+		JailedSerialLogPath:      path.Join("/", defaultLogDirName, defaultSerialLogName),
+		PIDFilePath:              filepath.Join(chrootRootDir, binName+".pid"),
+		SocketPath:               filepath.Join(chrootRootDir, defaultFirecrackerSocketDir, defaultFirecrackerSocketName),
 	}, nil
 }
 

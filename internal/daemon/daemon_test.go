@@ -2,10 +2,14 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,8 +44,6 @@ func (f *fakeRuntime) Delete(_ context.Context, state firecracker.MachineState) 
 }
 
 func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
-	t.Parallel()
-
 	root := t.TempDir()
 	cfg := testConfig(root)
 	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
@@ -49,13 +51,18 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 		t.Fatalf("create file store: %v", err)
 	}
 
+	sshListener := listenTestPort(t, int(defaultSSHPort))
+	defer sshListener.Close()
+	vncListener := listenTestPort(t, int(defaultVNCPort))
+	defer vncListener.Close()
+
 	startedAt := time.Unix(1700000005, 0).UTC()
 	runtime := &fakeRuntime{
 		bootState: firecracker.MachineState{
 			ID:          "vm-1",
 			Phase:       firecracker.PhaseRunning,
 			PID:         4321,
-			RuntimeHost: "172.16.0.2",
+			RuntimeHost: "127.0.0.1",
 			SocketPath:  filepath.Join(cfg.RuntimeDir, "machines", "vm-1", "root", "run", "firecracker.sock"),
 			TapName:     "fctap0",
 			StartedAt:   &startedAt,
@@ -95,11 +102,14 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	if response.Machine.Phase != contracthost.MachinePhaseRunning {
 		t.Fatalf("machine phase mismatch: got %q", response.Machine.Phase)
 	}
-	if response.Machine.RuntimeHost != "172.16.0.2" {
+	if response.Machine.RuntimeHost != "127.0.0.1" {
 		t.Fatalf("runtime host mismatch: got %q", response.Machine.RuntimeHost)
 	}
 	if len(response.Machine.Ports) != 2 {
 		t.Fatalf("machine ports mismatch: got %d want 2", len(response.Machine.Ports))
+	}
+	if response.Machine.Ports[0].Port != defaultSSHPort || response.Machine.Ports[1].Port != defaultVNCPort {
+		t.Fatalf("machine ports mismatch: got %#v", response.Machine.Ports)
 	}
 	if runtime.bootCalls != 1 {
 		t.Fatalf("boot call count mismatch: got %d want 1", runtime.bootCalls)
@@ -208,4 +218,28 @@ func testConfig(root string) appconfig.Config {
 		FirecrackerBinaryPath: "/usr/bin/firecracker",
 		JailerBinaryPath:      "/usr/bin/jailer",
 	}
+}
+
+func listenTestPort(t *testing.T, port int) net.Listener {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		var bindErr *net.OpError
+		if errors.As(err, &bindErr) && strings.Contains(strings.ToLower(err.Error()), "address already in use") {
+			t.Skipf("port %d already in use", port)
+		}
+		t.Fatalf("listen on port %d: %v", port, err)
+	}
+
+	go func() {
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = connection.Close()
+		}
+	}()
+	return listener
 }

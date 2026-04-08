@@ -69,11 +69,11 @@ func (r *Runtime) Boot(ctx context.Context, spec MachineSpec, usedNetworks []Net
 		return nil, err
 	}
 
-	cleanup := func(network NetworkAllocation, paths machinePaths, command *exec.Cmd) {
+	cleanup := func(network NetworkAllocation, paths machinePaths, command *exec.Cmd, firecrackerPID int) {
 		if preserveFailureArtifacts() {
-			fmt.Fprintf(os.Stderr, "firecracker debug: preserving failure artifacts machine=%s pid=%d socket=%s base=%s\n", spec.ID, pidOf(command), paths.SocketPath, paths.BaseDir)
 			return
 		}
+		cleanupRunningProcess(firecrackerPID)
 		cleanupStartedProcess(command)
 		_ = r.networkProvisioner.Remove(context.Background(), network)
 		if paths.BaseDir != "" {
@@ -88,55 +88,51 @@ func (r *Runtime) Boot(ctx context.Context, spec MachineSpec, usedNetworks []Net
 
 	paths, err := buildMachinePaths(r.rootDir, spec.ID, r.firecrackerBinaryPath)
 	if err != nil {
-		cleanup(network, machinePaths{}, nil)
+		cleanup(network, machinePaths{}, nil, 0)
 		return nil, err
 	}
-	if err := os.MkdirAll(paths.JailerBaseDir, 0o755); err != nil {
-		cleanup(network, paths, nil)
-		return nil, fmt.Errorf("create machine jailer dir %q: %w", paths.JailerBaseDir, err)
+	if err := os.MkdirAll(paths.LogDir, 0o755); err != nil {
+		cleanup(network, paths, nil, 0)
+		return nil, fmt.Errorf("create machine log dir %q: %w", paths.LogDir, err)
 	}
 	if err := r.networkProvisioner.Ensure(ctx, network); err != nil {
-		cleanup(network, paths, nil)
+		cleanup(network, paths, nil, 0)
 		return nil, err
 	}
 
 	command, err := launchJailedFirecracker(paths, spec.ID, r.firecrackerBinaryPath, r.jailerBinaryPath)
 	if err != nil {
-		cleanup(network, paths, nil)
+		cleanup(network, paths, nil, 0)
 		return nil, err
 	}
-	socketPath := paths.SocketPath
-	if pid := pidOf(command); pid > 0 {
-		socketPath = procSocketPath(pid)
+	firecrackerPID, err := waitForPIDFile(ctx, paths.PIDFilePath)
+	if err != nil {
+		cleanup(network, paths, command, 0)
+		return nil, fmt.Errorf("wait for firecracker pid: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, "firecracker debug: launched machine=%s pid=%d socket=%s jailer_base=%s\n", spec.ID, pidOf(command), socketPath, paths.JailerBaseDir)
 
+	socketPath := procSocketPath(firecrackerPID)
 	client := newAPIClient(socketPath)
 	if err := waitForSocket(ctx, client, socketPath); err != nil {
-		cleanup(network, paths, command)
+		cleanup(network, paths, command, firecrackerPID)
 		return nil, fmt.Errorf("wait for firecracker socket: %w", err)
 	}
 
 	jailedSpec, err := stageMachineFiles(spec, paths)
 	if err != nil {
-		cleanup(network, paths, command)
+		cleanup(network, paths, command, firecrackerPID)
 		return nil, err
 	}
-	if err := configureMachine(ctx, client, jailedSpec, network); err != nil {
-		cleanup(network, paths, command)
+	if err := configureMachine(ctx, client, paths, jailedSpec, network); err != nil {
+		cleanup(network, paths, command, firecrackerPID)
 		return nil, err
-	}
-
-	pid := 0
-	if command.Process != nil {
-		pid = command.Process.Pid
 	}
 
 	now := time.Now().UTC()
 	state := MachineState{
 		ID:          spec.ID,
 		Phase:       PhaseRunning,
-		PID:         pid,
+		PID:         firecrackerPID,
 		RuntimeHost: network.GuestIP().String(),
 		SocketPath:  socketPath,
 		TapName:     network.TapName,
@@ -214,11 +210,15 @@ func processExists(pid int) bool {
 	return err == nil || err == syscall.EPERM
 }
 
-func pidOf(command *exec.Cmd) int {
-	if command == nil || command.Process == nil {
-		return 0
+func cleanupRunningProcess(pid int) {
+	if pid < 1 {
+		return
 	}
-	return command.Process.Pid
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return
+	}
+	_ = process.Kill()
 }
 
 func preserveFailureArtifacts() bool {

@@ -77,6 +77,12 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 		return nil, err
 	}
 
+	ports := defaultMachinePorts()
+	if err := waitForGuestReady(ctx, state.RuntimeHost, ports); err != nil {
+		_ = d.runtime.Delete(context.Background(), *state)
+		return nil, err
+	}
+
 	now := time.Now().UTC()
 	systemVolumeRecord := model.VolumeRecord{
 		ID:                d.systemVolumeID(req.MachineID),
@@ -117,7 +123,7 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 		UserVolumeIDs:  append([]contracthost.VolumeID(nil), attachedUserVolumeIDs...),
 		RuntimeHost:    state.RuntimeHost,
 		TapDevice:      state.TapName,
-		Ports:          defaultMachinePorts(),
+		Ports:          ports,
 		Phase:          contracthost.MachinePhaseRunning,
 		PID:            state.PID,
 		SocketPath:     state.SocketPath,
