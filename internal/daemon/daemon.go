@@ -1,12 +1,95 @@
 package daemon
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"sync"
+
+	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
+	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/store"
+	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
-type Runtime interface{}
+const (
+	defaultGuestKernelArgs = "console=ttyS0 reboot=k panic=1 pci=off"
+	defaultGuestMemoryMiB  = int64(512)
+	defaultGuestVCPUs      = int64(1)
+	defaultSSHPort         = uint16(2222)
+	defaultVNCPort         = uint16(6080)
+	defaultCopyBufferSize  = 1024 * 1024
+)
+
+type Runtime interface {
+	Boot(context.Context, firecracker.MachineSpec, []firecracker.NetworkAllocation) (*firecracker.MachineState, error)
+	Inspect(firecracker.MachineState) (*firecracker.MachineState, error)
+	Delete(context.Context, firecracker.MachineState) error
+}
 
 type Daemon struct {
-	Store   store.Store
-	Runtime Runtime
+	config  appconfig.Config
+	store   store.Store
+	runtime Runtime
+
+	locksMu       sync.Mutex
+	machineLocks  map[contracthost.MachineID]*sync.Mutex
+	artifactLocks map[string]*sync.Mutex
+}
+
+func New(cfg appconfig.Config, store store.Store, runtime Runtime) (*Daemon, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	if store == nil {
+		return nil, fmt.Errorf("store is required")
+	}
+	if runtime == nil {
+		return nil, fmt.Errorf("runtime is required")
+	}
+	for _, dir := range []string{cfg.ArtifactsDir, cfg.MachineDisksDir, cfg.RuntimeDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create daemon dir %q: %w", dir, err)
+		}
+	}
+	return &Daemon{
+		config:        cfg,
+		store:         store,
+		runtime:       runtime,
+		machineLocks:  make(map[contracthost.MachineID]*sync.Mutex),
+		artifactLocks: make(map[string]*sync.Mutex),
+	}, nil
+}
+
+func (d *Daemon) Health(ctx context.Context) (*contracthost.HealthResponse, error) {
+	if _, err := d.store.ListMachines(ctx); err != nil {
+		return nil, err
+	}
+	return &contracthost.HealthResponse{OK: true}, nil
+}
+
+func (d *Daemon) lockMachine(machineID contracthost.MachineID) func() {
+	d.locksMu.Lock()
+	lock, ok := d.machineLocks[machineID]
+	if !ok {
+		lock = &sync.Mutex{}
+		d.machineLocks[machineID] = lock
+	}
+	d.locksMu.Unlock()
+
+	lock.Lock()
+	return lock.Unlock
+}
+
+func (d *Daemon) lockArtifact(key string) func() {
+	d.locksMu.Lock()
+	lock, ok := d.artifactLocks[key]
+	if !ok {
+		lock = &sync.Mutex{}
+		d.artifactLocks[key] = lock
+	}
+	d.locksMu.Unlock()
+
+	lock.Lock()
+	return lock.Unlock
 }

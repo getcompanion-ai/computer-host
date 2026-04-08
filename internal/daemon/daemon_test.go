@@ -1,0 +1,211 @@
+package daemon
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
+	"github.com/getcompanion-ai/computer-host/internal/firecracker"
+	"github.com/getcompanion-ai/computer-host/internal/store"
+	contracthost "github.com/getcompanion-ai/computer-host/contract"
+)
+
+type fakeRuntime struct {
+	bootState   firecracker.MachineState
+	bootCalls   int
+	deleteCalls []firecracker.MachineState
+	lastSpec    firecracker.MachineSpec
+}
+
+func (f *fakeRuntime) Boot(_ context.Context, spec firecracker.MachineSpec, _ []firecracker.NetworkAllocation) (*firecracker.MachineState, error) {
+	f.bootCalls++
+	f.lastSpec = spec
+	state := f.bootState
+	return &state, nil
+}
+
+func (f *fakeRuntime) Inspect(state firecracker.MachineState) (*firecracker.MachineState, error) {
+	copy := state
+	return &copy, nil
+}
+
+func (f *fakeRuntime) Delete(_ context.Context, state firecracker.MachineState) error {
+	f.deleteCalls = append(f.deleteCalls, state)
+	return nil
+}
+
+func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	startedAt := time.Unix(1700000005, 0).UTC()
+	runtime := &fakeRuntime{
+		bootState: firecracker.MachineState{
+			ID:          "vm-1",
+			Phase:       firecracker.PhaseRunning,
+			PID:         4321,
+			RuntimeHost: "172.16.0.2",
+			SocketPath:  filepath.Join(cfg.RuntimeDir, "machines", "vm-1", "root", "run", "firecracker.sock"),
+			TapName:     "fctap0",
+			StartedAt:   &startedAt,
+		},
+	}
+
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+
+	kernelPayload := []byte("kernel-image")
+	rootFSPayload := []byte("rootfs-image")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/kernel":
+			_, _ = w.Write(kernelPayload)
+		case "/rootfs":
+			_, _ = w.Write(rootFSPayload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	response, err := hostDaemon.CreateMachine(context.Background(), contracthost.CreateMachineRequest{
+		MachineID: "vm-1",
+		Artifact: contracthost.ArtifactRef{
+			KernelImageURL: server.URL + "/kernel",
+			RootFSURL:      server.URL + "/rootfs",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create machine: %v", err)
+	}
+
+	if response.Machine.Phase != contracthost.MachinePhaseRunning {
+		t.Fatalf("machine phase mismatch: got %q", response.Machine.Phase)
+	}
+	if response.Machine.RuntimeHost != "172.16.0.2" {
+		t.Fatalf("runtime host mismatch: got %q", response.Machine.RuntimeHost)
+	}
+	if len(response.Machine.Ports) != 2 {
+		t.Fatalf("machine ports mismatch: got %d want 2", len(response.Machine.Ports))
+	}
+	if runtime.bootCalls != 1 {
+		t.Fatalf("boot call count mismatch: got %d want 1", runtime.bootCalls)
+	}
+	if runtime.lastSpec.KernelImagePath == "" || runtime.lastSpec.RootFSPath == "" {
+		t.Fatalf("runtime spec paths not populated: %#v", runtime.lastSpec)
+	}
+	if _, err := os.Stat(runtime.lastSpec.KernelImagePath); err != nil {
+		t.Fatalf("kernel artifact not staged: %v", err)
+	}
+	if _, err := os.Stat(runtime.lastSpec.RootFSPath); err != nil {
+		t.Fatalf("system disk not staged: %v", err)
+	}
+
+	artifact, err := fileStore.GetArtifact(context.Background(), response.Machine.Artifact)
+	if err != nil {
+		t.Fatalf("get artifact: %v", err)
+	}
+	if artifact.KernelImagePath == "" || artifact.RootFSPath == "" {
+		t.Fatalf("artifact paths missing: %#v", artifact)
+	}
+	if payload, err := os.ReadFile(artifact.KernelImagePath); err != nil {
+		t.Fatalf("read kernel artifact: %v", err)
+	} else if string(payload) != string(kernelPayload) {
+		t.Fatalf("kernel artifact payload mismatch: got %q", string(payload))
+	}
+
+	machine, err := fileStore.GetMachine(context.Background(), "vm-1")
+	if err != nil {
+		t.Fatalf("get machine: %v", err)
+	}
+	if machine.SystemVolumeID != "vm-1-system" {
+		t.Fatalf("system volume mismatch: got %q", machine.SystemVolumeID)
+	}
+
+	operations, err := fileStore.ListOperations(context.Background())
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(operations) != 0 {
+		t.Fatalf("operation journal should be empty after success: got %d entries", len(operations))
+	}
+}
+
+func TestCreateMachineRejectsNonHTTPArtifactURLs(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+	hostDaemon, err := New(cfg, fileStore, &fakeRuntime{})
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+
+	_, err = hostDaemon.CreateMachine(context.Background(), contracthost.CreateMachineRequest{
+		MachineID: "vm-1",
+		Artifact: contracthost.ArtifactRef{
+			KernelImageURL: "file:///kernel",
+			RootFSURL:      "https://example.com/rootfs",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected create machine to fail for non-http artifact url")
+	}
+	if got := err.Error(); got != "artifact.kernel_image_url must use http or https" {
+		t.Fatalf("unexpected error: %q", got)
+	}
+}
+
+func TestDeleteMachineMissingIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+	runtime := &fakeRuntime{}
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+
+	if err := hostDaemon.DeleteMachine(context.Background(), "missing"); err != nil {
+		t.Fatalf("delete missing machine: %v", err)
+	}
+	if len(runtime.deleteCalls) != 0 {
+		t.Fatalf("delete runtime should not be called for missing machine")
+	}
+}
+
+func testConfig(root string) appconfig.Config {
+	return appconfig.Config{
+		RootDir:               root,
+		StatePath:             filepath.Join(root, "state", "state.json"),
+		OperationsPath:        filepath.Join(root, "state", "ops.json"),
+		ArtifactsDir:          filepath.Join(root, "artifacts"),
+		MachineDisksDir:       filepath.Join(root, "machine-disks"),
+		RuntimeDir:            filepath.Join(root, "runtime"),
+		SocketPath:            filepath.Join(root, "firecracker-host.sock"),
+		FirecrackerBinaryPath: "/usr/bin/firecracker",
+		JailerBinaryPath:      "/usr/bin/jailer",
+	}
+}

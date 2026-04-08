@@ -3,28 +3,40 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 )
 
-// Config contains the minimum host-local settings required to boot a machine.
+const defaultSocketName = "firecracker-host.sock"
+
+// Config contains the host-local daemon settings.
 type Config struct {
 	RootDir               string
+	StatePath             string
+	OperationsPath        string
+	ArtifactsDir          string
+	MachineDisksDir       string
+	RuntimeDir            string
+	SocketPath            string
 	FirecrackerBinaryPath string
 	JailerBinaryPath      string
-	KernelImagePath       string
-	RootFSPath            string
 }
 
-// Load loads and validates the firecracker-host configuration from the environment.
+// Load loads and validates the firecracker-host daemon configuration from the environment.
 func Load() (Config, error) {
+	rootDir := filepath.Clean(strings.TrimSpace(os.Getenv("FIRECRACKER_HOST_ROOT_DIR")))
 	cfg := Config{
-		RootDir:               strings.TrimSpace(os.Getenv("FIRECRACKER_HOST_ROOT_DIR")),
+		RootDir:               rootDir,
+		StatePath:             filepath.Join(rootDir, "state", "state.json"),
+		OperationsPath:        filepath.Join(rootDir, "state", "ops.json"),
+		ArtifactsDir:          filepath.Join(rootDir, "artifacts"),
+		MachineDisksDir:       filepath.Join(rootDir, "machine-disks"),
+		RuntimeDir:            filepath.Join(rootDir, "runtime"),
+		SocketPath:            filepath.Join(rootDir, defaultSocketName),
 		FirecrackerBinaryPath: strings.TrimSpace(os.Getenv("FIRECRACKER_BINARY_PATH")),
 		JailerBinaryPath:      strings.TrimSpace(os.Getenv("JAILER_BINARY_PATH")),
-		KernelImagePath:       strings.TrimSpace(os.Getenv("FIRECRACKER_GUEST_KERNEL_PATH")),
-		RootFSPath:            strings.TrimSpace(os.Getenv("FIRECRACKER_GUEST_ROOTFS_PATH")),
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -43,19 +55,31 @@ func (c Config) Validate() error {
 	if c.JailerBinaryPath == "" {
 		return fmt.Errorf("JAILER_BINARY_PATH is required")
 	}
-	if c.KernelImagePath == "" {
-		return fmt.Errorf("FIRECRACKER_GUEST_KERNEL_PATH is required")
+	if strings.TrimSpace(c.StatePath) == "" {
+		return fmt.Errorf("state path is required")
 	}
-	if c.RootFSPath == "" {
-		return fmt.Errorf("FIRECRACKER_GUEST_ROOTFS_PATH is required")
+	if strings.TrimSpace(c.OperationsPath) == "" {
+		return fmt.Errorf("operations path is required")
+	}
+	if strings.TrimSpace(c.ArtifactsDir) == "" {
+		return fmt.Errorf("artifacts dir is required")
+	}
+	if strings.TrimSpace(c.MachineDisksDir) == "" {
+		return fmt.Errorf("machine disks dir is required")
+	}
+	if strings.TrimSpace(c.RuntimeDir) == "" {
+		return fmt.Errorf("runtime dir is required")
+	}
+	if strings.TrimSpace(c.SocketPath) == "" {
+		return fmt.Errorf("socket path is required")
 	}
 	return nil
 }
 
-// FirecrackerRuntimeConfig converts the host config into the runtime wrapper's concrete runtime config.
+// FirecrackerRuntimeConfig converts the daemon config into the Firecracker runtime config.
 func (c Config) FirecrackerRuntimeConfig() firecracker.RuntimeConfig {
 	return firecracker.RuntimeConfig{
-		RootDir:               c.RootDir,
+		RootDir:               c.RuntimeDir,
 		FirecrackerBinaryPath: c.FirecrackerBinaryPath,
 		JailerBinaryPath:      c.JailerBinaryPath,
 	}

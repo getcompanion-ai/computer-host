@@ -2,10 +2,13 @@ package store
 
 import (
 	"context"
+	"errors"
 
 	"github.com/getcompanion-ai/computer-host/internal/model"
 	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
+
+var ErrNotFound = errors.New("store: not found")
 
 type Store interface {
 	PutArtifact(context.Context, model.ArtifactRecord) error
@@ -21,4 +24,7 @@ type Store interface {
 	ListVolumes(context.Context) ([]model.VolumeRecord, error)
 	UpdateVolume(context.Context, model.VolumeRecord) error
 	DeleteVolume(context.Context, contracthost.VolumeID) error
+	UpsertOperation(context.Context, model.OperationRecord) error
+	ListOperations(context.Context) ([]model.OperationRecord, error)
+	DeleteOperation(context.Context, contracthost.MachineID) error
 }

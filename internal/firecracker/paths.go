@@ -3,6 +3,7 @@ package firecracker
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -44,4 +45,8 @@ func buildMachinePaths(rootDir string, id MachineID, firecrackerBinaryPath strin
 		JailerBaseDir: jailerBaseDir,
 		SocketPath:    filepath.Join(chrootRootDir, defaultFirecrackerSocketDir, defaultFirecrackerSocketName),
 	}, nil
+}
+
+func procSocketPath(pid int) string {
+	return filepath.Join("/proc", strconv.Itoa(pid), "root", defaultFirecrackerSocketDir, defaultFirecrackerSocketName)
 }

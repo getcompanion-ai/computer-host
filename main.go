@@ -2,76 +2,75 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"flag"
 	"fmt"
-	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
-	"strings"
+	"path/filepath"
 	"syscall"
 
 	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
+	"github.com/getcompanion-ai/computer-host/internal/daemon"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
-	"github.com/getcompanion-ai/computer-host/internal/service"
+	"github.com/getcompanion-ai/computer-host/internal/httpapi"
+	"github.com/getcompanion-ai/computer-host/internal/store"
 )
-
-type options struct {
-	MachineID firecracker.MachineID
-}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	opts, err := parseOptions(os.Args[1:], os.Stderr)
-	if err != nil {
-		exit(err)
-	}
 
 	cfg, err := appconfig.Load()
 	if err != nil {
 		exit(err)
 	}
 
-	svc, err := service.New(cfg)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
 	if err != nil {
 		exit(err)
 	}
 
-	state, err := svc.CreateMachine(ctx, service.CreateMachineRequest{ID: opts.MachineID})
+	runtime, err := firecracker.NewRuntime(cfg.FirecrackerRuntimeConfig())
 	if err != nil {
 		exit(err)
 	}
 
-	if err := writeJSON(os.Stdout, state); err != nil {
+	hostDaemon, err := daemon.New(cfg, fileStore, runtime)
+	if err != nil {
 		exit(err)
 	}
-}
-
-func parseOptions(args []string, stderr io.Writer) (options, error) {
-	fs := flag.NewFlagSet("firecracker-host", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-
-	var machineID string
-	fs.StringVar(&machineID, "machine-id", "", "machine id to boot")
-
-	if err := fs.Parse(args); err != nil {
-		return options{}, err
+	if err := hostDaemon.Reconcile(ctx); err != nil {
+		exit(err)
 	}
 
-	machineID = strings.TrimSpace(machineID)
-	if machineID == "" {
-		return options{}, fmt.Errorf("-machine-id is required")
+	handler, err := httpapi.New(hostDaemon)
+	if err != nil {
+		exit(err)
 	}
 
-	return options{MachineID: firecracker.MachineID(machineID)}, nil
-}
+	if err := os.MkdirAll(filepath.Dir(cfg.SocketPath), 0o755); err != nil {
+		exit(err)
+	}
+	if err := os.Remove(cfg.SocketPath); err != nil && !os.IsNotExist(err) {
+		exit(err)
+	}
 
-func writeJSON(w io.Writer, value any) error {
-	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(value)
+	listener, err := net.Listen("unix", cfg.SocketPath)
+	if err != nil {
+		exit(err)
+	}
+	defer listener.Close()
+
+	server := &http.Server{Handler: handler.Routes()}
+	go func() {
+		<-ctx.Done()
+		_ = server.Shutdown(context.Background())
+	}()
+
+	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+		exit(err)
+	}
 }
 
 func exit(err error) {

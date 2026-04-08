@@ -14,7 +14,7 @@ import (
 
 const (
 	defaultCgroupVersion           = "2"
-	defaultFirecrackerInitTimeout  = 3 * time.Second
+	defaultFirecrackerInitTimeout  = 10 * time.Second
 	defaultFirecrackerPollInterval = 10 * time.Millisecond
 	defaultRootDriveID             = "root_drive"
 	defaultVSockRunDir             = "/run"
@@ -120,20 +120,34 @@ func waitForSocket(ctx context.Context, client *apiClient, socketPath string) er
 	ticker := time.NewTicker(defaultFirecrackerPollInterval)
 	defer ticker.Stop()
 
+	var lastStatErr error
+	var lastPingErr error
+
 	for {
 		select {
 		case <-waitContext.Done():
-			return waitContext.Err()
+			switch {
+			case lastPingErr != nil:
+				return fmt.Errorf("%w (socket=%q last_ping_err=%v)", waitContext.Err(), socketPath, lastPingErr)
+			case lastStatErr != nil:
+				return fmt.Errorf("%w (socket=%q last_stat_err=%v)", waitContext.Err(), socketPath, lastStatErr)
+			default:
+				return fmt.Errorf("%w (socket=%q)", waitContext.Err(), socketPath)
+			}
 		case <-ticker.C:
 			if _, err := os.Stat(socketPath); err != nil {
 				if os.IsNotExist(err) {
+					lastStatErr = err
 					continue
 				}
 				return fmt.Errorf("stat socket %q: %w", socketPath, err)
 			}
+			lastStatErr = nil
 			if err := client.Ping(waitContext); err != nil {
+				lastPingErr = err
 				continue
 			}
+			lastPingErr = nil
 			return nil
 		}
 	}

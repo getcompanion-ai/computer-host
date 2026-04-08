@@ -17,6 +17,8 @@ const (
 
 type ArtifactRecord struct {
 	Ref             contracthost.ArtifactRef
+	LocalKey        string
+	LocalDir        string
 	KernelImagePath string
 	RootFSPath      string
 	CreatedAt       time.Time
@@ -32,6 +34,8 @@ type MachineRecord struct {
 	Ports          []contracthost.MachinePort
 	Phase          contracthost.MachinePhase
 	Error          string
+	PID            int
+	SocketPath     string
 	CreatedAt      time.Time
 	StartedAt      *time.Time
 }
@@ -44,4 +48,18 @@ type VolumeRecord struct {
 	Pool              StoragePool
 	Path              string
 	CreatedAt         time.Time
+}
+
+type MachineOperation string
+
+const (
+	MachineOperationCreate MachineOperation = "create"
+	MachineOperationStop   MachineOperation = "stop"
+	MachineOperationDelete MachineOperation = "delete"
+)
+
+type OperationRecord struct {
+	MachineID contracthost.MachineID
+	Type      MachineOperation
+	StartedAt time.Time
 }

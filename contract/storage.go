@@ -3,8 +3,8 @@ package host
 import "time"
 
 type ArtifactRef struct {
-	ID      ArtifactID      `json:"id"`
-	Version ArtifactVersion `json:"version"`
+	KernelImageURL string `json:"kernel_image_url"`
+	RootFSURL      string `json:"rootfs_url"`
 }
 
 type Volume struct {

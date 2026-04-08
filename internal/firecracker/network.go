@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"net"
 	"net/netip"
 	"os/exec"
 	"strings"
@@ -45,6 +46,30 @@ type IPTapProvisioner struct {
 // GuestIP returns the guest IP address.
 func (n NetworkAllocation) GuestIP() netip.Addr {
 	return n.GuestCIDR.Addr()
+}
+
+// AllocationFromGuestIP reconstructs the host-side allocation from a guest IP and tap name.
+func AllocationFromGuestIP(guestIP string, tapName string) (NetworkAllocation, error) {
+	parsed := net.ParseIP(strings.TrimSpace(guestIP))
+	if parsed == nil {
+		return NetworkAllocation{}, fmt.Errorf("parse guest ip %q", guestIP)
+	}
+	addr, ok := netip.AddrFromSlice(parsed.To4())
+	if !ok {
+		return NetworkAllocation{}, fmt.Errorf("guest ip %q must be IPv4", guestIP)
+	}
+
+	base := ipv4ToUint32(addr) - 2
+	hostIP := uint32ToIPv4(base + 1)
+	guest := uint32ToIPv4(base + 2)
+	return NetworkAllocation{
+		InterfaceID: defaultInterfaceID,
+		TapName:     strings.TrimSpace(tapName),
+		HostCIDR:    netip.PrefixFrom(hostIP, defaultNetworkPrefixBits),
+		GuestCIDR:   netip.PrefixFrom(guest, defaultNetworkPrefixBits),
+		GatewayIP:   hostIP,
+		GuestMAC:    macForIPv4(guest),
+	}, nil
 }
 
 // NewNetworkAllocator returns a new /30 allocator rooted at the provided IPv4 prefix.
