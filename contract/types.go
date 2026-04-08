@@ -1,6 +1,8 @@
 package host
 
-import "time"
+type ArtifactID string
+
+type ArtifactVersion string
 
 type MachineID string
 
@@ -23,12 +25,3 @@ const (
 	VolumeKindSystem VolumeKind = "system"
 	VolumeKindUser   VolumeKind = "user"
 )
-
-type Machine struct {
-	ID          MachineID    `json:"id"`
-	Phase       MachinePhase `json:"phase"`
-	RuntimeHost string       `json:"runtime_host,omitempty"`
-	Error       string       `json:"error,omitempty"`
-	CreatedAt   time.Time    `json:"created_at"`
-	StartedAt   *time.Time   `json:"started_at,omitempty"`
-}

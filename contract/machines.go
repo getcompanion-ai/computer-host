@@ -1,7 +1,23 @@
 package host
 
+import "time"
+
+type Machine struct {
+	ID             MachineID    `json:"id"`
+	Artifact       ArtifactRef  `json:"artifact"`
+	SystemVolumeID VolumeID     `json:"system_volume_id,omitempty"`
+	UserVolumeIDs  []VolumeID   `json:"user_volume_ids,omitempty"`
+	Phase          MachinePhase `json:"phase"`
+	RuntimeHost    string       `json:"runtime_host,omitempty"`
+	Error          string       `json:"error,omitempty"`
+	CreatedAt      time.Time    `json:"created_at"`
+	StartedAt      *time.Time   `json:"started_at,omitempty"`
+}
+
 type CreateMachineRequest struct {
-	MachineID MachineID `json:"machine_id"`
+	MachineID     MachineID   `json:"machine_id"`
+	Artifact      ArtifactRef `json:"artifact"`
+	UserVolumeIDs []VolumeID  `json:"user_volume_ids,omitempty"`
 }
 
 type CreateMachineResponse struct {
