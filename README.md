@@ -13,11 +13,9 @@ devices and nftables rules for networking, handles SSH key generation,
 guest identity injection, and disk snapshots - all as atomic operations
 behind a single host-level contract.
 
-## API
+### API
 
-All endpoints accept and return JSON over a Unix socket.
-
-### Machines
+All endpoints accept and return JSON over Unix socket.
 
 ```
 GET    /health                          health check
@@ -26,11 +24,6 @@ GET    /machines                        list all machines
 GET    /machines/{id}                   get machine by id
 DELETE /machines/{id}                   delete a machine
 POST   /machines/{id}/stop              stop a running machine
-```
-
-### Snapshots
-
-```
 POST   /machines/{id}/snapshots         snapshot a running machine
 GET    /machines/{id}/snapshots          list snapshots for a machine
 GET    /snapshots/{id}                  get snapshot by id
@@ -38,7 +31,7 @@ DELETE /snapshots/{id}                  delete a snapshot
 POST   /snapshots/{id}/restore          restore snapshot to a new machine
 ```
 
-## Running
+### Running
 
 Requires a Linux host with KVM, Firecracker, and jailer installed.
 
