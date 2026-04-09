@@ -67,18 +67,3 @@ func buildMachinePaths(rootDir string, id MachineID, firecrackerBinaryPath strin
 func procSocketPath(pid int) string {
 	return filepath.Join("/proc", strconv.Itoa(pid), "root", defaultFirecrackerSocketDir, defaultFirecrackerSocketName)
 }
-
-type snapshotPaths struct {
-	BaseDir       string
-	MemFilePath   string
-	StateFilePath string
-}
-
-func buildSnapshotPaths(rootDir string, id string) snapshotPaths {
-	baseDir := filepath.Join(rootDir, "snapshots", id)
-	return snapshotPaths{
-		BaseDir:       baseDir,
-		MemFilePath:   filepath.Join(baseDir, "memory.bin"),
-		StateFilePath: filepath.Join(baseDir, "vmstate.bin"),
-	}
-}

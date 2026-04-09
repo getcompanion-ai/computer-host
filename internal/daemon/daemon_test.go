@@ -73,9 +73,13 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	}
 
 	sshListener := listenTestPort(t, int(defaultSSHPort))
-	defer sshListener.Close()
+	defer func() {
+		_ = sshListener.Close()
+	}()
 	vncListener := listenTestPort(t, int(defaultVNCPort))
-	defer vncListener.Close()
+	defer func() {
+		_ = vncListener.Close()
+	}()
 
 	startedAt := time.Unix(1700000005, 0).UTC()
 	runtime := &fakeRuntime{
@@ -339,9 +343,13 @@ func TestRestoreSnapshotUsesSnapshotMetadataWithoutSourceMachine(t *testing.T) {
 	}
 
 	sshListener := listenTestPort(t, int(defaultSSHPort))
-	defer sshListener.Close()
+	defer func() {
+		_ = sshListener.Close()
+	}()
 	vncListener := listenTestPort(t, int(defaultVNCPort))
-	defer vncListener.Close()
+	defer func() {
+		_ = vncListener.Close()
+	}()
 
 	startedAt := time.Unix(1700000099, 0).UTC()
 	runtime := &fakeRuntime{

@@ -19,15 +19,15 @@ func TestCloneFilePreservesSparseDiskUsage(t *testing.T) {
 		t.Fatalf("open source file: %v", err)
 	}
 	if _, err := sourceFile.Write([]byte("head")); err != nil {
-		sourceFile.Close()
+		_ = sourceFile.Close()
 		t.Fatalf("write source prefix: %v", err)
 	}
 	if _, err := sourceFile.Seek(32<<20, io.SeekStart); err != nil {
-		sourceFile.Close()
+		_ = sourceFile.Close()
 		t.Fatalf("seek source hole: %v", err)
 	}
 	if _, err := sourceFile.Write([]byte("tail")); err != nil {
-		sourceFile.Close()
+		_ = sourceFile.Close()
 		t.Fatalf("write source suffix: %v", err)
 	}
 	if err := sourceFile.Close(); err != nil {

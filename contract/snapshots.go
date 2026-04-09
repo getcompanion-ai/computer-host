@@ -10,6 +10,10 @@ type Snapshot struct {
 	CreatedAt time.Time  `json:"created_at"`
 }
 
+type CreateSnapshotRequest struct {
+	SnapshotID SnapshotID `json:"snapshot_id"`
+}
+
 type CreateSnapshotResponse struct {
 	Snapshot Snapshot `json:"snapshot"`
 }

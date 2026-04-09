@@ -23,10 +23,11 @@ type persistedOperations struct {
 }
 
 type persistedState struct {
-	Artifacts []model.ArtifactRecord  `json:"artifacts"`
-	Machines  []model.MachineRecord   `json:"machines"`
-	Volumes   []model.VolumeRecord    `json:"volumes"`
-	Snapshots []model.SnapshotRecord  `json:"snapshots"`
+	Artifacts      []model.ArtifactRecord      `json:"artifacts"`
+	Machines       []model.MachineRecord       `json:"machines"`
+	Volumes        []model.VolumeRecord        `json:"volumes"`
+	Snapshots      []model.SnapshotRecord      `json:"snapshots"`
+	PublishedPorts []model.PublishedPortRecord `json:"published_ports"`
 }
 
 func NewFileStore(statePath string, operationsPath string) (*FileStore, error) {
@@ -327,6 +328,17 @@ func (s *FileStore) ListSnapshotsByMachine(_ context.Context, machineID contract
 	return result, nil
 }
 
+func (s *FileStore) ListSnapshots(_ context.Context) ([]model.SnapshotRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state, err := s.readState()
+	if err != nil {
+		return nil, err
+	}
+	return append([]model.SnapshotRecord(nil), state.Snapshots...), nil
+}
+
 func (s *FileStore) DeleteSnapshot(_ context.Context, id contracthost.SnapshotID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -335,6 +347,74 @@ func (s *FileStore) DeleteSnapshot(_ context.Context, id contracthost.SnapshotID
 		for i := range state.Snapshots {
 			if state.Snapshots[i].ID == id {
 				state.Snapshots = append(state.Snapshots[:i], state.Snapshots[i+1:]...)
+				return nil
+			}
+		}
+		return ErrNotFound
+	})
+}
+
+func (s *FileStore) CreatePublishedPort(_ context.Context, record model.PublishedPortRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.updateState(func(state *persistedState) error {
+		for _, port := range state.PublishedPorts {
+			if port.ID == record.ID {
+				return fmt.Errorf("store: published port %q already exists", record.ID)
+			}
+			if port.HostPort == record.HostPort {
+				return fmt.Errorf("store: host port %d already exists", record.HostPort)
+			}
+		}
+		state.PublishedPorts = append(state.PublishedPorts, record)
+		return nil
+	})
+}
+
+func (s *FileStore) GetPublishedPort(_ context.Context, id contracthost.PublishedPortID) (*model.PublishedPortRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state, err := s.readState()
+	if err != nil {
+		return nil, err
+	}
+	for i := range state.PublishedPorts {
+		if state.PublishedPorts[i].ID == id {
+			record := state.PublishedPorts[i]
+			return &record, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (s *FileStore) ListPublishedPorts(_ context.Context, machineID contracthost.MachineID) ([]model.PublishedPortRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state, err := s.readState()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]model.PublishedPortRecord, 0, len(state.PublishedPorts))
+	for _, port := range state.PublishedPorts {
+		if machineID != "" && port.MachineID != machineID {
+			continue
+		}
+		result = append(result, port)
+	}
+	return result, nil
+}
+
+func (s *FileStore) DeletePublishedPort(_ context.Context, id contracthost.PublishedPortID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.updateState(func(state *persistedState) error {
+		for i := range state.PublishedPorts {
+			if state.PublishedPorts[i].ID == id {
+				state.PublishedPorts = append(state.PublishedPorts[:i], state.PublishedPorts[i+1:]...)
 				return nil
 			}
 		}
@@ -422,11 +502,11 @@ func writeJSONFileAtomically(path string, value any) error {
 		return fmt.Errorf("open temp store file %q: %w", tmpPath, err)
 	}
 	if _, err := file.Write(payload); err != nil {
-		file.Close()
+		_ = file.Close()
 		return fmt.Errorf("write temp store file %q: %w", tmpPath, err)
 	}
 	if err := file.Sync(); err != nil {
-		file.Close()
+		_ = file.Close()
 		return fmt.Errorf("sync temp store file %q: %w", tmpPath, err)
 	}
 	if err := file.Close(); err != nil {
@@ -441,7 +521,7 @@ func writeJSONFileAtomically(path string, value any) error {
 		return fmt.Errorf("open store dir for %q: %w", path, err)
 	}
 	if err := dir.Sync(); err != nil {
-		dir.Close()
+		_ = dir.Close()
 		return fmt.Errorf("sync store dir for %q: %w", path, err)
 	}
 	if err := dir.Close(); err != nil {
@@ -452,10 +532,11 @@ func writeJSONFileAtomically(path string, value any) error {
 
 func emptyPersistedState() persistedState {
 	return persistedState{
-		Artifacts: []model.ArtifactRecord{},
-		Machines:  []model.MachineRecord{},
-		Volumes:   []model.VolumeRecord{},
-		Snapshots: []model.SnapshotRecord{},
+		Artifacts:      []model.ArtifactRecord{},
+		Machines:       []model.MachineRecord{},
+		Volumes:        []model.VolumeRecord{},
+		Snapshots:      []model.SnapshotRecord{},
+		PublishedPorts: []model.PublishedPortRecord{},
 	}
 }
 
@@ -475,6 +556,9 @@ func normalizeState(state *persistedState) {
 	}
 	if state.Snapshots == nil {
 		state.Snapshots = []model.SnapshotRecord{}
+	}
+	if state.PublishedPorts == nil {
+		state.PublishedPorts = []model.PublishedPortRecord{}
 	}
 }
 

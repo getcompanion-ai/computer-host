@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+
+	"golang.org/x/sync/errgroup"
 
 	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
 	"github.com/getcompanion-ai/computer-host/internal/daemon"
@@ -56,19 +59,49 @@ func main() {
 		exit(err)
 	}
 
-	listener, err := net.Listen("unix", cfg.SocketPath)
+	unixListener, err := net.Listen("unix", cfg.SocketPath)
 	if err != nil {
 		exit(err)
 	}
-	defer listener.Close()
-
-	server := &http.Server{Handler: handler.Routes()}
-	go func() {
-		<-ctx.Done()
-		_ = server.Shutdown(context.Background())
+	defer func() {
+		_ = unixListener.Close()
 	}()
 
-	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+	servers := []*http.Server{{Handler: handler.Routes()}}
+	listeners := []net.Listener{unixListener}
+	if cfg.HTTPAddr != "" {
+		httpListener, err := net.Listen("tcp", cfg.HTTPAddr)
+		if err != nil {
+			exit(err)
+		}
+		defer func() {
+			_ = httpListener.Close()
+		}()
+		servers = append(servers, &http.Server{Handler: handler.Routes()})
+		listeners = append(listeners, httpListener)
+	}
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	for i := range servers {
+		server := servers[i]
+		listener := listeners[i]
+		group.Go(func() error {
+			err := server.Serve(listener)
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
+		})
+	}
+	group.Go(func() error {
+		<-groupCtx.Done()
+		for _, server := range servers {
+			_ = server.Shutdown(context.Background())
+		}
+		return nil
+	})
+
+	if err := group.Wait(); err != nil {
 		exit(err)
 	}
 }

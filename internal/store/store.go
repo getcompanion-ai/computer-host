@@ -29,6 +29,11 @@ type Store interface {
 	DeleteOperation(context.Context, contracthost.MachineID) error
 	CreateSnapshot(context.Context, model.SnapshotRecord) error
 	GetSnapshot(context.Context, contracthost.SnapshotID) (*model.SnapshotRecord, error)
+	ListSnapshots(context.Context) ([]model.SnapshotRecord, error)
 	ListSnapshotsByMachine(context.Context, contracthost.MachineID) ([]model.SnapshotRecord, error)
 	DeleteSnapshot(context.Context, contracthost.SnapshotID) error
+	CreatePublishedPort(context.Context, model.PublishedPortRecord) error
+	GetPublishedPort(context.Context, contracthost.PublishedPortID) (*model.PublishedPortRecord, error)
+	ListPublishedPorts(context.Context, contracthost.MachineID) ([]model.PublishedPortRecord, error)
+	DeletePublishedPort(context.Context, contracthost.PublishedPortID) error
 }

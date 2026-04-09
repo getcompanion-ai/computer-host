@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"sync"
 	"time"
@@ -45,6 +46,9 @@ type Daemon struct {
 	locksMu       sync.Mutex
 	machineLocks  map[contracthost.MachineID]*sync.Mutex
 	artifactLocks map[string]*sync.Mutex
+
+	publishedPortsMu       sync.Mutex
+	publishedPortListeners map[contracthost.PublishedPortID]net.Listener
 }
 
 func New(cfg appconfig.Config, store store.Store, runtime Runtime) (*Daemon, error) {
@@ -69,6 +73,7 @@ func New(cfg appconfig.Config, store store.Store, runtime Runtime) (*Daemon, err
 		reconfigureGuestIdentity: nil,
 		machineLocks:             make(map[contracthost.MachineID]*sync.Mutex),
 		artifactLocks:            make(map[string]*sync.Mutex),
+		publishedPortListeners:   make(map[contracthost.PublishedPortID]net.Listener),
 	}
 	daemon.reconfigureGuestIdentity = daemon.reconfigureGuestIdentityOverSSH
 	if err := daemon.ensureBackendSSHKeyPair(); err != nil {

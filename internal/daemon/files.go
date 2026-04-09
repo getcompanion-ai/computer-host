@@ -53,7 +53,9 @@ func cloneFile(source string, target string) error {
 	if err != nil {
 		return fmt.Errorf("open source file %q: %w", source, err)
 	}
-	defer sourceFile.Close()
+	defer func() {
+		_ = sourceFile.Close()
+	}()
 
 	sourceInfo, err := sourceFile.Stat()
 	if err != nil {
@@ -67,15 +69,15 @@ func cloneFile(source string, target string) error {
 	}
 
 	if _, err := writeSparseFile(targetFile, sourceFile); err != nil {
-		targetFile.Close()
+		_ = targetFile.Close()
 		return fmt.Errorf("copy %q to %q: %w", source, tmpPath, err)
 	}
 	if err := targetFile.Truncate(sourceInfo.Size()); err != nil {
-		targetFile.Close()
+		_ = targetFile.Close()
 		return fmt.Errorf("truncate target file %q: %w", tmpPath, err)
 	}
 	if err := targetFile.Sync(); err != nil {
-		targetFile.Close()
+		_ = targetFile.Close()
 		return fmt.Errorf("sync target file %q: %w", tmpPath, err)
 	}
 	if err := targetFile.Close(); err != nil {
@@ -108,7 +110,9 @@ func downloadFile(ctx context.Context, rawURL string, path string) error {
 	if err != nil {
 		return fmt.Errorf("download %q: %w", rawURL, err)
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+	}()
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %q: status %d", rawURL, response.StatusCode)
 	}
@@ -121,15 +125,15 @@ func downloadFile(ctx context.Context, rawURL string, path string) error {
 
 	size, err := writeSparseFile(file, response.Body)
 	if err != nil {
-		file.Close()
+		_ = file.Close()
 		return fmt.Errorf("write download target %q: %w", tmpPath, err)
 	}
 	if err := file.Truncate(size); err != nil {
-		file.Close()
+		_ = file.Close()
 		return fmt.Errorf("truncate download target %q: %w", tmpPath, err)
 	}
 	if err := file.Sync(); err != nil {
-		file.Close()
+		_ = file.Close()
 		return fmt.Errorf("sync download target %q: %w", tmpPath, err)
 	}
 	if err := file.Close(); err != nil {
@@ -267,7 +271,9 @@ func injectGuestConfig(ctx context.Context, imagePath string, config *contractho
 	if err != nil {
 		return fmt.Errorf("create guest config staging dir: %w", err)
 	}
-	defer os.RemoveAll(stagingDir)
+	defer func() {
+		_ = os.RemoveAll(stagingDir)
+	}()
 
 	if len(config.AuthorizedKeys) > 0 {
 		authorizedKeysPath := filepath.Join(stagingDir, "authorized_keys")
@@ -306,7 +312,9 @@ func injectMachineIdentity(ctx context.Context, imagePath string, machineID cont
 	if err != nil {
 		return fmt.Errorf("create machine identity staging dir: %w", err)
 	}
-	defer os.RemoveAll(stagingDir)
+	defer func() {
+		_ = os.RemoveAll(stagingDir)
+	}()
 
 	identityFiles := map[string]string{
 		"/etc/microagent/machine-name": machineName + "\n",
@@ -368,6 +376,18 @@ func machineToContract(record model.MachineRecord) contracthost.Machine {
 	}
 }
 
+func publishedPortToContract(record model.PublishedPortRecord) contracthost.PublishedPort {
+	return contracthost.PublishedPort{
+		ID:        record.ID,
+		MachineID: record.MachineID,
+		Name:      record.Name,
+		Port:      record.Port,
+		HostPort:  record.HostPort,
+		Protocol:  record.Protocol,
+		CreatedAt: record.CreatedAt,
+	}
+}
+
 func machineToRuntimeState(record model.MachineRecord) firecracker.MachineState {
 	phase := firecracker.PhaseStopped
 	switch record.Phase {
@@ -426,6 +446,13 @@ func validateMachineID(machineID contracthost.MachineID) error {
 	return nil
 }
 
+func validateSnapshotID(snapshotID contracthost.SnapshotID) error {
+	if strings.TrimSpace(string(snapshotID)) == "" {
+		return fmt.Errorf("snapshot_id is required")
+	}
+	return nil
+}
+
 func validateDownloadURL(field string, raw string) error {
 	value := strings.TrimSpace(raw)
 	if value == "" {
@@ -450,7 +477,7 @@ func syncDir(path string) error {
 		return fmt.Errorf("open dir %q: %w", path, err)
 	}
 	if err := dir.Sync(); err != nil {
-		dir.Close()
+		_ = dir.Close()
 		return fmt.Errorf("sync dir %q: %w", path, err)
 	}
 	if err := dir.Close(); err != nil {

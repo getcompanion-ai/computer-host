@@ -21,6 +21,7 @@ type Config struct {
 	SnapshotsDir          string
 	RuntimeDir            string
 	SocketPath            string
+	HTTPAddr              string
 	EgressInterface       string
 	FirecrackerBinaryPath string
 	JailerBinaryPath      string
@@ -38,6 +39,7 @@ func Load() (Config, error) {
 		SnapshotsDir:          filepath.Join(rootDir, "snapshots"),
 		RuntimeDir:            filepath.Join(rootDir, "runtime"),
 		SocketPath:            filepath.Join(rootDir, defaultSocketName),
+		HTTPAddr:              strings.TrimSpace(os.Getenv("FIRECRACKER_HOST_HTTP_ADDR")),
 		EgressInterface:       strings.TrimSpace(os.Getenv("FIRECRACKER_HOST_EGRESS_INTERFACE")),
 		FirecrackerBinaryPath: strings.TrimSpace(os.Getenv("FIRECRACKER_BINARY_PATH")),
 		JailerBinaryPath:      strings.TrimSpace(os.Getenv("JAILER_BINARY_PATH")),

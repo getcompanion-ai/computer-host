@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -18,9 +16,13 @@ import (
 	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
-func (d *Daemon) CreateSnapshot(ctx context.Context, machineID contracthost.MachineID) (*contracthost.CreateSnapshotResponse, error) {
+func (d *Daemon) CreateSnapshot(ctx context.Context, machineID contracthost.MachineID, req contracthost.CreateSnapshotRequest) (*contracthost.CreateSnapshotResponse, error) {
 	unlock := d.lockMachine(machineID)
 	defer unlock()
+
+	if err := validateSnapshotID(req.SnapshotID); err != nil {
+		return nil, err
+	}
 
 	record, err := d.store.GetMachine(ctx, machineID)
 	if err != nil {
@@ -39,7 +41,7 @@ func (d *Daemon) CreateSnapshot(ctx context.Context, machineID contracthost.Mach
 		}
 	}
 
-	snapshotID := contracthost.SnapshotID(generateID())
+	snapshotID := req.SnapshotID
 
 	if err := d.store.UpsertOperation(ctx, model.OperationRecord{
 		MachineID:  machineID,
@@ -356,14 +358,6 @@ func networkAllocationInUse(target firecracker.NetworkAllocation, used []firecra
 	return false
 }
 
-func generateID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("generate id: %v", err))
-	}
-	return hex.EncodeToString(b)
-}
-
 // moveFile copies src to dst then removes src. Works across filesystem boundaries
 // unlike os.Rename, which is needed when moving files out of /proc/<pid>/root/.
 func moveFile(src, dst string) error {
@@ -371,7 +365,9 @@ func moveFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() {
+		_ = in.Close()
+	}()
 
 	out, err := os.Create(dst)
 	if err != nil {
@@ -379,7 +375,7 @@ func moveFile(src, dst string) error {
 	}
 
 	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+		_ = out.Close()
 		_ = os.Remove(dst)
 		return err
 	}

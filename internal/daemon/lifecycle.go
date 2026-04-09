@@ -39,6 +39,88 @@ func (d *Daemon) ListMachines(ctx context.Context) (*contracthost.ListMachinesRe
 	return &contracthost.ListMachinesResponse{Machines: machines}, nil
 }
 
+func (d *Daemon) StartMachine(ctx context.Context, id contracthost.MachineID) (*contracthost.GetMachineResponse, error) {
+	unlock := d.lockMachine(id)
+	defer unlock()
+
+	record, err := d.store.GetMachine(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if record.Phase == contracthost.MachinePhaseRunning {
+		return &contracthost.GetMachineResponse{Machine: machineToContract(*record)}, nil
+	}
+	if record.Phase != contracthost.MachinePhaseStopped {
+		return nil, fmt.Errorf("machine %q is not startable from phase %q", id, record.Phase)
+	}
+
+	if err := d.store.UpsertOperation(ctx, model.OperationRecord{
+		MachineID: id,
+		Type:      model.MachineOperationStart,
+		StartedAt: time.Now().UTC(),
+	}); err != nil {
+		return nil, err
+	}
+
+	clearOperation := false
+	defer func() {
+		if clearOperation {
+			_ = d.store.DeleteOperation(context.Background(), id)
+		}
+	}()
+
+	systemVolume, err := d.store.GetVolume(ctx, record.SystemVolumeID)
+	if err != nil {
+		return nil, err
+	}
+	artifact, err := d.store.GetArtifact(ctx, record.Artifact)
+	if err != nil {
+		return nil, err
+	}
+	userVolumes, err := d.loadAttachableUserVolumes(ctx, id, record.UserVolumeIDs)
+	if err != nil {
+		return nil, err
+	}
+	spec, err := d.buildMachineSpec(id, artifact, userVolumes, systemVolume.Path)
+	if err != nil {
+		return nil, err
+	}
+	usedNetworks, err := d.listRunningNetworks(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	state, err := d.runtime.Boot(ctx, spec, usedNetworks)
+	if err != nil {
+		return nil, err
+	}
+	ports := defaultMachinePorts()
+	if err := waitForGuestReady(ctx, state.RuntimeHost, ports); err != nil {
+		_ = d.runtime.Delete(context.Background(), *state)
+		return nil, err
+	}
+
+	record.RuntimeHost = state.RuntimeHost
+	record.TapDevice = state.TapName
+	record.Ports = ports
+	record.Phase = contracthost.MachinePhaseRunning
+	record.Error = ""
+	record.PID = state.PID
+	record.SocketPath = state.SocketPath
+	record.StartedAt = state.StartedAt
+	if err := d.store.UpdateMachine(ctx, *record); err != nil {
+		_ = d.runtime.Delete(context.Background(), *state)
+		return nil, err
+	}
+	if err := d.ensurePublishedPortsForMachine(ctx, *record); err != nil {
+		d.stopPublishedPortsForMachine(id)
+		_ = d.runtime.Delete(context.Background(), *state)
+		return nil, err
+	}
+
+	clearOperation = true
+	return &contracthost.GetMachineResponse{Machine: machineToContract(*record)}, nil
+}
+
 func (d *Daemon) StopMachine(ctx context.Context, id contracthost.MachineID) error {
 	unlock := d.lockMachine(id)
 	defer unlock()
@@ -120,6 +202,10 @@ func (d *Daemon) Reconcile(ctx context.Context) error {
 			if err := d.reconcileCreate(ctx, operation.MachineID); err != nil {
 				return err
 			}
+		case model.MachineOperationStart:
+			if err := d.reconcileStart(ctx, operation.MachineID); err != nil {
+				return err
+			}
 		case model.MachineOperationStop:
 			if err := d.reconcileStop(ctx, operation.MachineID); err != nil {
 				return err
@@ -148,6 +234,13 @@ func (d *Daemon) Reconcile(ctx context.Context) error {
 	for _, record := range records {
 		if _, err := d.reconcileMachine(ctx, record.ID); err != nil {
 			return err
+		}
+		if record.Phase == contracthost.MachinePhaseRunning {
+			if err := d.ensurePublishedPortsForMachine(ctx, record); err != nil {
+				return err
+			}
+		} else {
+			d.stopPublishedPortsForMachine(record.ID)
 		}
 	}
 	return nil
@@ -218,6 +311,26 @@ func (d *Daemon) reconcileStop(ctx context.Context, machineID contracthost.Machi
 	return d.store.DeleteOperation(ctx, machineID)
 }
 
+func (d *Daemon) reconcileStart(ctx context.Context, machineID contracthost.MachineID) error {
+	record, err := d.store.GetMachine(ctx, machineID)
+	if err == store.ErrNotFound {
+		return d.store.DeleteOperation(ctx, machineID)
+	}
+	if err != nil {
+		return err
+	}
+	if record.Phase == contracthost.MachinePhaseRunning {
+		if err := d.ensurePublishedPortsForMachine(ctx, *record); err != nil {
+			return err
+		}
+		return d.store.DeleteOperation(ctx, machineID)
+	}
+	if _, err := d.StartMachine(ctx, machineID); err != nil {
+		return err
+	}
+	return d.store.DeleteOperation(ctx, machineID)
+}
+
 func (d *Daemon) reconcileDelete(ctx context.Context, machineID contracthost.MachineID) error {
 	record, err := d.store.GetMachine(ctx, machineID)
 	if err == store.ErrNotFound {
@@ -266,6 +379,7 @@ func (d *Daemon) reconcileMachine(ctx context.Context, machineID contracthost.Ma
 	if err := d.runtime.Delete(ctx, *state); err != nil {
 		return nil, err
 	}
+	d.stopPublishedPortsForMachine(record.ID)
 	record.Phase = contracthost.MachinePhaseFailed
 	record.Error = state.Error
 	record.PID = 0
@@ -280,8 +394,14 @@ func (d *Daemon) reconcileMachine(ctx context.Context, machineID contracthost.Ma
 }
 
 func (d *Daemon) deleteMachineRecord(ctx context.Context, record *model.MachineRecord) error {
+	d.stopPublishedPortsForMachine(record.ID)
 	if err := d.runtime.Delete(ctx, machineToRuntimeState(*record)); err != nil {
 		return err
+	}
+	if ports, err := d.store.ListPublishedPorts(ctx, record.ID); err == nil {
+		for _, port := range ports {
+			_ = d.store.DeletePublishedPort(ctx, port.ID)
+		}
 	}
 	if err := d.detachVolumesForMachine(ctx, record.ID); err != nil {
 		return err
@@ -304,6 +424,7 @@ func (d *Daemon) deleteMachineRecord(ctx context.Context, record *model.MachineR
 }
 
 func (d *Daemon) stopMachineRecord(ctx context.Context, record *model.MachineRecord) error {
+	d.stopPublishedPortsForMachine(record.ID)
 	if err := d.runtime.Delete(ctx, machineToRuntimeState(*record)); err != nil {
 		return err
 	}

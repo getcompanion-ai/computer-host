@@ -161,7 +161,6 @@ func waitForSocket(ctx context.Context, client *apiClient, socketPath string) er
 				lastPingErr = err
 				continue
 			}
-			lastPingErr = nil
 			return nil
 		}
 	}
@@ -229,13 +228,6 @@ func waitForPIDFile(ctx context.Context, pidFilePath string) (int, error) {
 			return 0, err
 		}
 	}
-}
-
-func hostVSockPath(paths machinePaths, spec MachineSpec) string {
-	if spec.Vsock == nil {
-		return ""
-	}
-	return filepath.Join(paths.ChrootRootDir, defaultFirecrackerSocketDir, filepath.Base(strings.TrimSpace(spec.Vsock.Path)))
 }
 
 func jailedVSockPath(spec MachineSpec) string {

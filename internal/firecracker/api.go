@@ -231,7 +231,9 @@ func (c *apiClient) do(ctx context.Context, method string, endpoint string, inpu
 	if err != nil {
 		return fmt.Errorf("do %s %s via %q: %w", method, endpoint, c.socketPath, err)
 	}
-	defer response.Body.Close()
+	defer func() {
+		_ = response.Body.Close()
+	}()
 
 	if response.StatusCode != wantStatus {
 		return decodeFirecrackerError(method, endpoint, response)

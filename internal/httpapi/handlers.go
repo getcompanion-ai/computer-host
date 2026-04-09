@@ -14,14 +14,19 @@ type Service interface {
 	CreateMachine(context.Context, contracthost.CreateMachineRequest) (*contracthost.CreateMachineResponse, error)
 	GetMachine(context.Context, contracthost.MachineID) (*contracthost.GetMachineResponse, error)
 	ListMachines(context.Context) (*contracthost.ListMachinesResponse, error)
+	StartMachine(context.Context, contracthost.MachineID) (*contracthost.GetMachineResponse, error)
 	StopMachine(context.Context, contracthost.MachineID) error
 	DeleteMachine(context.Context, contracthost.MachineID) error
 	Health(context.Context) (*contracthost.HealthResponse, error)
-	CreateSnapshot(context.Context, contracthost.MachineID) (*contracthost.CreateSnapshotResponse, error)
+	GetStorageReport(context.Context) (*contracthost.GetStorageReportResponse, error)
+	CreateSnapshot(context.Context, contracthost.MachineID, contracthost.CreateSnapshotRequest) (*contracthost.CreateSnapshotResponse, error)
 	ListSnapshots(context.Context, contracthost.MachineID) (*contracthost.ListSnapshotsResponse, error)
 	GetSnapshot(context.Context, contracthost.SnapshotID) (*contracthost.GetSnapshotResponse, error)
 	DeleteSnapshotByID(context.Context, contracthost.SnapshotID) error
 	RestoreSnapshot(context.Context, contracthost.SnapshotID, contracthost.RestoreSnapshotRequest) (*contracthost.RestoreSnapshotResponse, error)
+	CreatePublishedPort(context.Context, contracthost.MachineID, contracthost.CreatePublishedPortRequest) (*contracthost.CreatePublishedPortResponse, error)
+	ListPublishedPorts(context.Context, contracthost.MachineID) (*contracthost.ListPublishedPortsResponse, error)
+	DeletePublishedPort(context.Context, contracthost.MachineID, contracthost.PublishedPortID) error
 }
 
 type Handler struct {
@@ -38,6 +43,7 @@ func New(service Service) (*Handler, error) {
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", h.handleHealth)
+	mux.HandleFunc("/storage/report", h.handleStorageReport)
 	mux.HandleFunc("/machines", h.handleMachines)
 	mux.HandleFunc("/machines/", h.handleMachine)
 	mux.HandleFunc("/snapshots/", h.handleSnapshot)
@@ -50,6 +56,19 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, err := h.service.Health(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) handleStorageReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+	response, err := h.service.GetStorageReport(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -126,6 +145,20 @@ func (h *Handler) handleMachine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "start" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		response, err := h.service.StartMachine(r.Context(), machineID)
+		if err != nil {
+			writeError(w, statusForError(err), err)
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+
 	if len(parts) == 2 && parts[1] == "snapshots" {
 		switch r.Method {
 		case http.MethodGet:
@@ -136,7 +169,12 @@ func (h *Handler) handleMachine(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, http.StatusOK, response)
 		case http.MethodPost:
-			response, err := h.service.CreateSnapshot(r.Context(), machineID)
+			var request contracthost.CreateSnapshotRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			response, err := h.service.CreateSnapshot(r.Context(), machineID, request)
 			if err != nil {
 				writeError(w, statusForError(err), err)
 				return
@@ -145,6 +183,46 @@ func (h *Handler) handleMachine(w http.ResponseWriter, r *http.Request) {
 		default:
 			writeMethodNotAllowed(w)
 		}
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "published-ports" {
+		switch r.Method {
+		case http.MethodGet:
+			response, err := h.service.ListPublishedPorts(r.Context(), machineID)
+			if err != nil {
+				writeError(w, statusForError(err), err)
+				return
+			}
+			writeJSON(w, http.StatusOK, response)
+		case http.MethodPost:
+			var request contracthost.CreatePublishedPortRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			response, err := h.service.CreatePublishedPort(r.Context(), machineID, request)
+			if err != nil {
+				writeError(w, statusForError(err), err)
+				return
+			}
+			writeJSON(w, http.StatusCreated, response)
+		default:
+			writeMethodNotAllowed(w)
+		}
+		return
+	}
+
+	if len(parts) == 3 && parts[1] == "published-ports" {
+		if r.Method != http.MethodDelete {
+			writeMethodNotAllowed(w)
+			return
+		}
+		if err := h.service.DeletePublishedPort(r.Context(), machineID, contracthost.PublishedPortID(parts[2])); err != nil {
+			writeError(w, statusForError(err), err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 

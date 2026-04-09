@@ -9,10 +9,12 @@ import (
 type StoragePool string
 
 const (
-	StoragePoolArtifacts    StoragePool = "artifacts"
-	StoragePoolMachineDisks StoragePool = "machine-disks"
-	StoragePoolState        StoragePool = "state"
-	StoragePoolUserVolumes  StoragePool = "user-volumes"
+	StoragePoolArtifacts      StoragePool = "artifacts"
+	StoragePoolMachineDisks   StoragePool = "machine-disks"
+	StoragePoolPublishedPorts StoragePool = "published-ports"
+	StoragePoolSnapshots      StoragePool = "snapshots"
+	StoragePoolState          StoragePool = "state"
+	StoragePoolUserVolumes    StoragePool = "user-volumes"
 )
 
 type ArtifactRecord struct {
@@ -54,6 +56,7 @@ type MachineOperation string
 
 const (
 	MachineOperationCreate   MachineOperation = "create"
+	MachineOperationStart    MachineOperation = "start"
 	MachineOperationStop     MachineOperation = "stop"
 	MachineOperationDelete   MachineOperation = "delete"
 	MachineOperationSnapshot MachineOperation = "snapshot"
@@ -70,6 +73,16 @@ type SnapshotRecord struct {
 	SourceRuntimeHost string
 	SourceTapDevice   string
 	CreatedAt         time.Time
+}
+
+type PublishedPortRecord struct {
+	ID        contracthost.PublishedPortID
+	MachineID contracthost.MachineID
+	Name      string
+	Port      uint16
+	HostPort  uint16
+	Protocol  contracthost.PortProtocol
+	CreatedAt time.Time
 }
 
 type OperationRecord struct {
