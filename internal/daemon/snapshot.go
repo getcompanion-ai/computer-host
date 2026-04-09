@@ -42,6 +42,11 @@ func (d *Daemon) CreateSnapshot(ctx context.Context, machineID contracthost.Mach
 	}
 
 	snapshotID := req.SnapshotID
+	if _, err := d.store.GetSnapshot(ctx, snapshotID); err == nil {
+		return nil, fmt.Errorf("snapshot %q already exists", snapshotID)
+	} else if err != nil && err != store.ErrNotFound {
+		return nil, err
+	}
 
 	if err := d.store.UpsertOperation(ctx, model.OperationRecord{
 		MachineID:  machineID,
@@ -60,7 +65,10 @@ func (d *Daemon) CreateSnapshot(ctx context.Context, machineID contracthost.Mach
 	}()
 
 	snapshotDir := filepath.Join(d.config.SnapshotsDir, string(snapshotID))
-	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
+	if err := os.Mkdir(snapshotDir, 0o755); err != nil {
+		if os.IsExist(err) {
+			return nil, fmt.Errorf("snapshot %q already exists", snapshotID)
+		}
 		return nil, fmt.Errorf("create snapshot dir: %w", err)
 	}
 

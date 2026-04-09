@@ -233,15 +233,16 @@ func (d *Daemon) Reconcile(ctx context.Context) error {
 		return err
 	}
 	for _, record := range records {
-		if _, err := d.reconcileMachine(ctx, record.ID); err != nil {
+		reconciled, err := d.reconcileMachine(ctx, record.ID)
+		if err != nil {
 			return err
 		}
-		if record.Phase == contracthost.MachinePhaseRunning {
-			if err := d.ensurePublishedPortsForMachine(ctx, record); err != nil {
+		if reconciled.Phase == contracthost.MachinePhaseRunning {
+			if err := d.ensurePublishedPortsForMachine(ctx, *reconciled); err != nil {
 				return err
 			}
 		} else {
-			d.stopPublishedPortsForMachine(record.ID)
+			d.stopPublishedPortsForMachine(reconciled.ID)
 		}
 	}
 	return nil
