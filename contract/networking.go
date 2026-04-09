@@ -16,5 +16,6 @@ const (
 type MachinePort struct {
 	Name     MachinePortName `json:"name"`
 	Port     uint16          `json:"port"`
+	HostPort uint16          `json:"host_port,omitempty"`
 	Protocol PortProtocol    `json:"protocol"`
 }

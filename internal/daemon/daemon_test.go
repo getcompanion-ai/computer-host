@@ -98,6 +98,7 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
 
 	kernelPayload := []byte("kernel-image")
 	rootFSImagePath := filepath.Join(root, "guest-rootfs.ext4")
@@ -261,6 +262,7 @@ func TestRestoreSnapshotRejectsRunningSourceMachine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
 	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID) error { return nil }
 
 	artifactRef := contracthost.ArtifactRef{KernelImageURL: "kernel", RootFSURL: "rootfs"}
@@ -367,6 +369,7 @@ func TestRestoreSnapshotUsesSnapshotMetadataWithoutSourceMachine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
 	var reconfiguredHost string
 	var reconfiguredMachine contracthost.MachineID
 	hostDaemon.reconfigureGuestIdentity = func(_ context.Context, host string, machineID contracthost.MachineID) error {
@@ -508,6 +511,7 @@ func TestDeleteMachineMissingIsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
 
 	if err := hostDaemon.DeleteMachine(context.Background(), "missing"); err != nil {
 		t.Fatalf("delete missing machine: %v", err)
@@ -530,6 +534,12 @@ func testConfig(root string) appconfig.Config {
 		EgressInterface:       "eth0",
 		FirecrackerBinaryPath: "/usr/bin/firecracker",
 		JailerBinaryPath:      "/usr/bin/jailer",
+	}
+}
+
+func stubGuestSSHPublicKeyReader(hostDaemon *Daemon) {
+	hostDaemon.readGuestSSHPublicKey = func(context.Context, string) (string, error) {
+		return "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO0j1AyW0mQm9a1G2rY0R4fP2G5+4Qx2V3FJ9P2mA6N3", nil
 	}
 }
 

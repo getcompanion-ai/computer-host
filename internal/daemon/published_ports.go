@@ -177,11 +177,11 @@ func (d *Daemon) startPublishedPortProxy(port model.PublishedPortRecord, runtime
 	d.publishedPortsMu.Unlock()
 
 	targetAddr := net.JoinHostPort(targetHost, strconv.Itoa(int(port.Port)))
-	go d.servePublishedPortProxy(port.ID, listener, targetAddr)
+	go serveTCPProxy(listener, targetAddr)
 	return nil
 }
 
-func (d *Daemon) servePublishedPortProxy(portID contracthost.PublishedPortID, listener net.Listener, targetAddr string) {
+func serveTCPProxy(listener net.Listener, targetAddr string) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -190,11 +190,11 @@ func (d *Daemon) servePublishedPortProxy(portID contracthost.PublishedPortID, li
 			}
 			continue
 		}
-		go proxyPublishedPortConnection(conn, targetAddr)
+		go proxyTCPConnection(conn, targetAddr)
 	}
 }
 
-func proxyPublishedPortConnection(source net.Conn, targetAddr string) {
+func proxyTCPConnection(source net.Conn, targetAddr string) {
 	defer func() {
 		_ = source.Close()
 	}()

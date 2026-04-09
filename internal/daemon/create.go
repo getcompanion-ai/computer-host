@@ -103,6 +103,11 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 		_ = d.runtime.Delete(context.Background(), *state)
 		return nil, err
 	}
+	guestSSHPublicKey, err := d.readGuestSSHPublicKey(ctx, state.RuntimeHost)
+	if err != nil {
+		_ = d.runtime.Delete(context.Background(), *state)
+		return nil, err
+	}
 
 	now := time.Now().UTC()
 	systemVolumeRecord := model.VolumeRecord{
@@ -138,19 +143,44 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	}
 
 	record := model.MachineRecord{
-		ID:             req.MachineID,
-		Artifact:       req.Artifact,
-		SystemVolumeID: systemVolumeRecord.ID,
-		UserVolumeIDs:  append([]contracthost.VolumeID(nil), attachedUserVolumeIDs...),
-		RuntimeHost:    state.RuntimeHost,
-		TapDevice:      state.TapName,
-		Ports:          ports,
-		Phase:          contracthost.MachinePhaseRunning,
-		PID:            state.PID,
-		SocketPath:     state.SocketPath,
-		CreatedAt:      now,
-		StartedAt:      state.StartedAt,
+		ID:                req.MachineID,
+		Artifact:          req.Artifact,
+		SystemVolumeID:    systemVolumeRecord.ID,
+		UserVolumeIDs:     append([]contracthost.VolumeID(nil), attachedUserVolumeIDs...),
+		RuntimeHost:       state.RuntimeHost,
+		TapDevice:         state.TapName,
+		Ports:             ports,
+		GuestSSHPublicKey: guestSSHPublicKey,
+		Phase:             contracthost.MachinePhaseRunning,
+		PID:               state.PID,
+		SocketPath:        state.SocketPath,
+		CreatedAt:         now,
+		StartedAt:         state.StartedAt,
 	}
+	d.relayAllocMu.Lock()
+	sshRelayPort, err := d.allocateMachineRelayProxy(ctx, record, contracthost.MachinePortNameSSH, record.RuntimeHost, defaultSSHPort, minMachineSSHRelayPort, maxMachineSSHRelayPort)
+	var vncRelayPort uint16
+	if err == nil {
+		vncRelayPort, err = d.allocateMachineRelayProxy(ctx, record, contracthost.MachinePortNameVNC, record.RuntimeHost, defaultVNCPort, minMachineVNCRelayPort, maxMachineVNCRelayPort)
+	}
+	d.relayAllocMu.Unlock()
+	if err != nil {
+		d.stopMachineRelays(record.ID)
+		for _, volume := range userVolumes {
+			volume.AttachedMachineID = nil
+			_ = d.store.UpdateVolume(context.Background(), volume)
+		}
+		_ = d.store.DeleteVolume(context.Background(), systemVolumeRecord.ID)
+		_ = d.runtime.Delete(context.Background(), *state)
+		return nil, err
+	}
+	record.Ports = buildMachinePorts(sshRelayPort, vncRelayPort)
+	startedRelays := true
+	defer func() {
+		if startedRelays {
+			d.stopMachineRelays(record.ID)
+		}
+	}()
 	if err := d.store.CreateMachine(ctx, record); err != nil {
 		for _, volume := range userVolumes {
 			volume.AttachedMachineID = nil
@@ -162,6 +192,7 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	}
 
 	removeSystemVolumeOnFailure = false
+	startedRelays = false
 	clearOperation = true
 	return &contracthost.CreateMachineResponse{Machine: machineToContract(record)}, nil
 }

@@ -187,9 +187,13 @@ func isZeroChunk(chunk []byte) bool {
 }
 
 func defaultMachinePorts() []contracthost.MachinePort {
+	return buildMachinePorts(0, 0)
+}
+
+func buildMachinePorts(sshRelayPort, vncRelayPort uint16) []contracthost.MachinePort {
 	return []contracthost.MachinePort{
-		{Name: contracthost.MachinePortNameSSH, Port: defaultSSHPort, Protocol: contracthost.PortProtocolTCP},
-		{Name: contracthost.MachinePortNameVNC, Port: defaultVNCPort, Protocol: contracthost.PortProtocolTCP},
+		{Name: contracthost.MachinePortNameSSH, Port: defaultSSHPort, HostPort: sshRelayPort, Protocol: contracthost.PortProtocolTCP},
+		{Name: contracthost.MachinePortNameVNC, Port: defaultVNCPort, HostPort: vncRelayPort, Protocol: contracthost.PortProtocolTCP},
 	}
 }
 
@@ -247,7 +251,14 @@ func (d *Daemon) mergedGuestConfig(config *contracthost.GuestConfig) (*contracth
 	}
 
 	merged := &contracthost.GuestConfig{
-		AuthorizedKeys: authorizedKeys,
+		AuthorizedKeys:    authorizedKeys,
+		TrustedUserCAKeys: nil,
+	}
+	if strings.TrimSpace(d.config.GuestLoginCAPublicKey) != "" {
+		merged.TrustedUserCAKeys = append(merged.TrustedUserCAKeys, d.config.GuestLoginCAPublicKey)
+	}
+	if config != nil {
+		merged.TrustedUserCAKeys = append(merged.TrustedUserCAKeys, config.TrustedUserCAKeys...)
 	}
 	if config != nil && config.LoginWebhook != nil {
 		loginWebhook := *config.LoginWebhook
@@ -260,7 +271,7 @@ func hasGuestConfig(config *contracthost.GuestConfig) bool {
 	if config == nil {
 		return false
 	}
-	return len(config.AuthorizedKeys) > 0 || config.LoginWebhook != nil
+	return len(config.AuthorizedKeys) > 0 || len(config.TrustedUserCAKeys) > 0 || config.LoginWebhook != nil
 }
 
 func injectGuestConfig(ctx context.Context, imagePath string, config *contracthost.GuestConfig) error {
@@ -282,6 +293,17 @@ func injectGuestConfig(ctx context.Context, imagePath string, config *contractho
 			return fmt.Errorf("write authorized_keys staging file: %w", err)
 		}
 		if err := replaceExt4File(ctx, imagePath, authorizedKeysPath, "/etc/microagent/authorized_keys"); err != nil {
+			return err
+		}
+	}
+
+	if len(config.TrustedUserCAKeys) > 0 {
+		trustedCAPath := filepath.Join(stagingDir, "trusted_user_ca_keys")
+		payload := []byte(strings.Join(config.TrustedUserCAKeys, "\n") + "\n")
+		if err := os.WriteFile(trustedCAPath, payload, 0o644); err != nil {
+			return fmt.Errorf("write trusted_user_ca_keys staging file: %w", err)
+		}
+		if err := replaceExt4File(ctx, imagePath, trustedCAPath, "/etc/microagent/trusted_user_ca_keys"); err != nil {
 			return err
 		}
 	}
@@ -363,16 +385,17 @@ func machineIDPtr(machineID contracthost.MachineID) *contracthost.MachineID {
 
 func machineToContract(record model.MachineRecord) contracthost.Machine {
 	return contracthost.Machine{
-		ID:             record.ID,
-		Artifact:       record.Artifact,
-		SystemVolumeID: record.SystemVolumeID,
-		UserVolumeIDs:  append([]contracthost.VolumeID(nil), record.UserVolumeIDs...),
-		RuntimeHost:    record.RuntimeHost,
-		Ports:          append([]contracthost.MachinePort(nil), record.Ports...),
-		Phase:          record.Phase,
-		Error:          record.Error,
-		CreatedAt:      record.CreatedAt,
-		StartedAt:      record.StartedAt,
+		ID:                record.ID,
+		Artifact:          record.Artifact,
+		SystemVolumeID:    record.SystemVolumeID,
+		UserVolumeIDs:     append([]contracthost.VolumeID(nil), record.UserVolumeIDs...),
+		RuntimeHost:       record.RuntimeHost,
+		Ports:             append([]contracthost.MachinePort(nil), record.Ports...),
+		GuestSSHPublicKey: record.GuestSSHPublicKey,
+		Phase:             record.Phase,
+		Error:             record.Error,
+		CreatedAt:         record.CreatedAt,
+		StartedAt:         record.StartedAt,
 	}
 }
 
@@ -425,6 +448,11 @@ func validateGuestConfig(config *contracthost.GuestConfig) error {
 	for i, key := range config.AuthorizedKeys {
 		if strings.TrimSpace(key) == "" {
 			return fmt.Errorf("guest_config.authorized_keys[%d] is required", i)
+		}
+	}
+	for i, key := range config.TrustedUserCAKeys {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("guest_config.trusted_user_ca_keys[%d] is required", i)
 		}
 	}
 	if config.LoginWebhook != nil {

@@ -99,10 +99,16 @@ func (d *Daemon) StartMachine(ctx context.Context, id contracthost.MachineID) (*
 		_ = d.runtime.Delete(context.Background(), *state)
 		return nil, err
 	}
+	guestSSHPublicKey, err := d.readGuestSSHPublicKey(ctx, state.RuntimeHost)
+	if err != nil {
+		_ = d.runtime.Delete(context.Background(), *state)
+		return nil, err
+	}
 
 	record.RuntimeHost = state.RuntimeHost
 	record.TapDevice = state.TapName
 	record.Ports = ports
+	record.GuestSSHPublicKey = guestSSHPublicKey
 	record.Phase = contracthost.MachinePhaseRunning
 	record.Error = ""
 	record.PID = state.PID
@@ -112,7 +118,13 @@ func (d *Daemon) StartMachine(ctx context.Context, id contracthost.MachineID) (*
 		_ = d.runtime.Delete(context.Background(), *state)
 		return nil, err
 	}
+	if err := d.ensureMachineRelays(ctx, record); err != nil {
+		d.stopMachineRelays(id)
+		_ = d.runtime.Delete(context.Background(), *state)
+		return nil, err
+	}
 	if err := d.ensurePublishedPortsForMachine(ctx, *record); err != nil {
+		d.stopMachineRelays(id)
 		d.stopPublishedPortsForMachine(id)
 		_ = d.runtime.Delete(context.Background(), *state)
 		return nil, err
@@ -238,10 +250,14 @@ func (d *Daemon) Reconcile(ctx context.Context) error {
 			return err
 		}
 		if reconciled.Phase == contracthost.MachinePhaseRunning {
+			if err := d.ensureMachineRelays(ctx, reconciled); err != nil {
+				return err
+			}
 			if err := d.ensurePublishedPortsForMachine(ctx, *reconciled); err != nil {
 				return err
 			}
 		} else {
+			d.stopMachineRelays(reconciled.ID)
 			d.stopPublishedPortsForMachine(reconciled.ID)
 		}
 	}
@@ -322,6 +338,9 @@ func (d *Daemon) reconcileStart(ctx context.Context, machineID contracthost.Mach
 		return err
 	}
 	if record.Phase == contracthost.MachinePhaseRunning {
+		if err := d.ensureMachineRelays(ctx, record); err != nil {
+			return err
+		}
 		if err := d.ensurePublishedPortsForMachine(ctx, *record); err != nil {
 			return err
 		}
@@ -375,12 +394,16 @@ func (d *Daemon) reconcileMachine(ctx context.Context, machineID contracthost.Ma
 		return nil, err
 	}
 	if state.Phase == firecracker.PhaseRunning {
+		if err := d.ensureMachineRelays(ctx, record); err != nil {
+			return nil, err
+		}
 		return record, nil
 	}
 
 	if err := d.runtime.Delete(ctx, *state); err != nil {
 		return nil, err
 	}
+	d.stopMachineRelays(record.ID)
 	d.stopPublishedPortsForMachine(record.ID)
 	record.Phase = contracthost.MachinePhaseFailed
 	record.Error = state.Error
@@ -396,6 +419,7 @@ func (d *Daemon) reconcileMachine(ctx context.Context, machineID contracthost.Ma
 }
 
 func (d *Daemon) deleteMachineRecord(ctx context.Context, record *model.MachineRecord) error {
+	d.stopMachineRelays(record.ID)
 	d.stopPublishedPortsForMachine(record.ID)
 	if err := d.runtime.Delete(ctx, machineToRuntimeState(*record)); err != nil {
 		return err
@@ -426,6 +450,7 @@ func (d *Daemon) deleteMachineRecord(ctx context.Context, record *model.MachineR
 }
 
 func (d *Daemon) stopMachineRecord(ctx context.Context, record *model.MachineRecord) error {
+	d.stopMachineRelays(record.ID)
 	d.stopPublishedPortsForMachine(record.ID)
 	if err := d.runtime.Delete(ctx, machineToRuntimeState(*record)); err != nil {
 		return err

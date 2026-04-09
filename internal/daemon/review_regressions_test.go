@@ -86,6 +86,7 @@ func TestCreatePublishedPortSerializesHostPortAllocationAcrossMachines(t *testin
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
 
 	for _, machineID := range []contracthost.MachineID{"vm-1", "vm-2"} {
 		if err := baseStore.CreateMachine(context.Background(), model.MachineRecord{
@@ -170,6 +171,7 @@ func TestGetStorageReportHandlesSparseSnapshotPathsAndIncludesPublishedPortPool(
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
 
 	response, err := hostDaemon.GetStorageReport(context.Background())
 	if err != nil {
@@ -209,6 +211,7 @@ func TestReconcileSnapshotPreservesArtifactsOnUnexpectedStoreError(t *testing.T)
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
 
 	snapshotID := contracthost.SnapshotID("snap-1")
 	operation := model.OperationRecord{
@@ -249,6 +252,7 @@ func TestReconcileRestorePreservesArtifactsOnUnexpectedStoreError(t *testing.T) 
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
 
 	operation := model.OperationRecord{
 		MachineID: "vm-1",
@@ -291,6 +295,7 @@ func TestCreateSnapshotRejectsDuplicateSnapshotIDWithoutTouchingExistingArtifact
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
 
 	machineID := contracthost.MachineID("vm-1")
 	snapshotID := contracthost.SnapshotID("snap-1")
@@ -346,6 +351,7 @@ func TestReconcileUsesReconciledMachineStateForPublishedPorts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
 
 	t.Cleanup(func() {
 		hostDaemon.stopPublishedPortProxy("port-1")

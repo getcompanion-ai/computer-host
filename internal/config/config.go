@@ -25,6 +25,7 @@ type Config struct {
 	EgressInterface       string
 	FirecrackerBinaryPath string
 	JailerBinaryPath      string
+	GuestLoginCAPublicKey string
 }
 
 // Load loads and validates the firecracker-host daemon configuration from the environment.
@@ -43,6 +44,7 @@ func Load() (Config, error) {
 		EgressInterface:       strings.TrimSpace(os.Getenv("FIRECRACKER_HOST_EGRESS_INTERFACE")),
 		FirecrackerBinaryPath: strings.TrimSpace(os.Getenv("FIRECRACKER_BINARY_PATH")),
 		JailerBinaryPath:      strings.TrimSpace(os.Getenv("JAILER_BINARY_PATH")),
+		GuestLoginCAPublicKey: strings.TrimSpace(os.Getenv("GUEST_LOGIN_CA_PUBLIC_KEY")),
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err

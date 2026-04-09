@@ -27,19 +27,20 @@ type ArtifactRecord struct {
 }
 
 type MachineRecord struct {
-	ID             contracthost.MachineID
-	Artifact       contracthost.ArtifactRef
-	SystemVolumeID contracthost.VolumeID
-	UserVolumeIDs  []contracthost.VolumeID
-	RuntimeHost    string
-	TapDevice      string
-	Ports          []contracthost.MachinePort
-	Phase          contracthost.MachinePhase
-	Error          string
-	PID            int
-	SocketPath     string
-	CreatedAt      time.Time
-	StartedAt      *time.Time
+	ID                contracthost.MachineID
+	Artifact          contracthost.ArtifactRef
+	SystemVolumeID    contracthost.VolumeID
+	UserVolumeIDs     []contracthost.VolumeID
+	RuntimeHost       string
+	TapDevice         string
+	Ports             []contracthost.MachinePort
+	GuestSSHPublicKey string
+	Phase             contracthost.MachinePhase
+	Error             string
+	PID               int
+	SocketPath        string
+	CreatedAt         time.Time
+	StartedAt         *time.Time
 }
 
 type VolumeRecord struct {

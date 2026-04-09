@@ -260,6 +260,13 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		clearOperation = true
 		return nil, fmt.Errorf("reconfigure restored guest identity: %w", err)
 	}
+	guestSSHPublicKey, err := d.readGuestSSHPublicKey(ctx, machineState.RuntimeHost)
+	if err != nil {
+		_ = d.runtime.Delete(ctx, *machineState)
+		_ = os.RemoveAll(filepath.Dir(newSystemDiskPath))
+		clearOperation = true
+		return nil, fmt.Errorf("read restored guest ssh host key: %w", err)
+	}
 
 	systemVolumeID := d.systemVolumeID(req.MachineID)
 	now := time.Now().UTC()
@@ -277,22 +284,42 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 	}
 
 	machineRecord := model.MachineRecord{
-		ID:             req.MachineID,
-		Artifact:       snap.Artifact,
-		SystemVolumeID: systemVolumeID,
-		RuntimeHost:    machineState.RuntimeHost,
-		TapDevice:      machineState.TapName,
-		Ports:          defaultMachinePorts(),
-		Phase:          contracthost.MachinePhaseRunning,
-		PID:            machineState.PID,
-		SocketPath:     machineState.SocketPath,
-		CreatedAt:      now,
-		StartedAt:      machineState.StartedAt,
+		ID:                req.MachineID,
+		Artifact:          snap.Artifact,
+		SystemVolumeID:    systemVolumeID,
+		RuntimeHost:       machineState.RuntimeHost,
+		TapDevice:         machineState.TapName,
+		Ports:             defaultMachinePorts(),
+		GuestSSHPublicKey: guestSSHPublicKey,
+		Phase:             contracthost.MachinePhaseRunning,
+		PID:               machineState.PID,
+		SocketPath:        machineState.SocketPath,
+		CreatedAt:         now,
+		StartedAt:         machineState.StartedAt,
 	}
+	d.relayAllocMu.Lock()
+	sshRelayPort, err := d.allocateMachineRelayProxy(ctx, machineRecord, contracthost.MachinePortNameSSH, machineRecord.RuntimeHost, defaultSSHPort, minMachineSSHRelayPort, maxMachineSSHRelayPort)
+	var vncRelayPort uint16
+	if err == nil {
+		vncRelayPort, err = d.allocateMachineRelayProxy(ctx, machineRecord, contracthost.MachinePortNameVNC, machineRecord.RuntimeHost, defaultVNCPort, minMachineVNCRelayPort, maxMachineVNCRelayPort)
+	}
+	d.relayAllocMu.Unlock()
+	if err != nil {
+		d.stopMachineRelays(machineRecord.ID)
+		return nil, err
+	}
+	machineRecord.Ports = buildMachinePorts(sshRelayPort, vncRelayPort)
+	startedRelays := true
+	defer func() {
+		if startedRelays {
+			d.stopMachineRelays(machineRecord.ID)
+		}
+	}()
 	if err := d.store.CreateMachine(ctx, machineRecord); err != nil {
 		return nil, err
 	}
 
+	startedRelays = false
 	clearOperation = true
 	return &contracthost.RestoreSnapshotResponse{
 		Machine: machineToContract(machineRecord),
