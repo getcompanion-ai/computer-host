@@ -52,11 +52,5 @@ curl --unix-socket /var/lib/computer-host/firecracker-host.sock \
   http://localhost/health
 ```
 
-### Environment variables
 
-| Variable | Description |
-|---|---|
-| `FIRECRACKER_HOST_ROOT_DIR` | Root directory for state, artifacts, disks, snapshots, and the socket |
-| `FIRECRACKER_BINARY_PATH` | Path to the `firecracker` binary |
-| `JAILER_BINARY_PATH` | Path to the `jailer` binary |
-| `FIRECRACKER_HOST_EGRESS_INTERFACE` | Host network interface for VM egress (e.g. `eth0`) |
+While some issues are resolved with github this repo is maintained [here](https://git.harivan.sh/getcompanion-ai/computer-host/issues)
