@@ -43,6 +43,7 @@ func (d *Daemon) GetStorageReport(ctx context.Context) (*contracthost.GetStorage
 	}{
 		{name: contracthost.StoragePoolArtifacts, path: d.config.ArtifactsDir},
 		{name: contracthost.StoragePoolMachineDisks, path: d.config.MachineDisksDir},
+		{name: contracthost.StoragePoolPublishedPort, path: ""},
 		{name: contracthost.StoragePoolSnapshots, path: d.config.SnapshotsDir},
 		{name: contracthost.StoragePoolState, path: filepath.Dir(d.config.StatePath)},
 	} {
@@ -133,8 +134,14 @@ func directorySize(root string) (int64, error) {
 }
 
 func fileSize(path string) (int64, error) {
+	if path == "" {
+		return 0, nil
+	}
 	info, err := os.Stat(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
 		return 0, fmt.Errorf("stat %q: %w", path, err)
 	}
 	return info.Size(), nil

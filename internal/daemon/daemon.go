@@ -47,6 +47,7 @@ type Daemon struct {
 	machineLocks  map[contracthost.MachineID]*sync.Mutex
 	artifactLocks map[string]*sync.Mutex
 
+	publishedPortAllocMu   sync.Mutex
 	publishedPortsMu       sync.Mutex
 	publishedPortListeners map[contracthost.PublishedPortID]net.Listener
 }

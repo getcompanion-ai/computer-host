@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -464,6 +465,9 @@ func (d *Daemon) reconcileSnapshot(ctx context.Context, operation model.Operatio
 		// Snapshot completed successfully, just clear the journal
 		return d.store.DeleteOperation(ctx, operation.MachineID)
 	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("get snapshot %q during reconciliation: %w", *operation.SnapshotID, err)
+	}
 	// Snapshot did not complete: clean up partial snapshot directory and resume the machine
 	snapshotDir := filepath.Join(d.config.SnapshotsDir, string(*operation.SnapshotID))
 	_ = os.RemoveAll(snapshotDir)
@@ -481,6 +485,9 @@ func (d *Daemon) reconcileRestore(ctx context.Context, operation model.Operation
 	if err == nil {
 		// Restore completed, clear journal
 		return d.store.DeleteOperation(ctx, operation.MachineID)
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("get machine %q during restore reconciliation: %w", operation.MachineID, err)
 	}
 	// Restore did not complete: clean up partial machine directory and disk
 	_ = os.RemoveAll(filepath.Dir(d.systemVolumePath(operation.MachineID)))

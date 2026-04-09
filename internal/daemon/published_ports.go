@@ -49,6 +49,9 @@ func (d *Daemon) CreatePublishedPort(ctx context.Context, machineID contracthost
 		return nil, err
 	}
 
+	d.publishedPortAllocMu.Lock()
+	defer d.publishedPortAllocMu.Unlock()
+
 	hostPort, err := d.allocatePublishedHostPort(ctx)
 	if err != nil {
 		return nil, err
