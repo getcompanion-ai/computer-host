@@ -17,6 +17,11 @@ type Service interface {
 	StopMachine(context.Context, contracthost.MachineID) error
 	DeleteMachine(context.Context, contracthost.MachineID) error
 	Health(context.Context) (*contracthost.HealthResponse, error)
+	CreateSnapshot(context.Context, contracthost.MachineID) (*contracthost.CreateSnapshotResponse, error)
+	ListSnapshots(context.Context, contracthost.MachineID) (*contracthost.ListSnapshotsResponse, error)
+	GetSnapshot(context.Context, contracthost.SnapshotID) (*contracthost.GetSnapshotResponse, error)
+	DeleteSnapshotByID(context.Context, contracthost.SnapshotID) error
+	RestoreSnapshot(context.Context, contracthost.SnapshotID, contracthost.RestoreSnapshotRequest) (*contracthost.RestoreSnapshotResponse, error)
 }
 
 type Handler struct {
@@ -35,6 +40,7 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("/health", h.handleHealth)
 	mux.HandleFunc("/machines", h.handleMachines)
 	mux.HandleFunc("/machines/", h.handleMachine)
+	mux.HandleFunc("/snapshots/", h.handleSnapshot)
 	return mux
 }
 
@@ -117,6 +123,80 @@ func (h *Handler) handleMachine(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "snapshots" {
+		switch r.Method {
+		case http.MethodGet:
+			response, err := h.service.ListSnapshots(r.Context(), machineID)
+			if err != nil {
+				writeError(w, statusForError(err), err)
+				return
+			}
+			writeJSON(w, http.StatusOK, response)
+		case http.MethodPost:
+			response, err := h.service.CreateSnapshot(r.Context(), machineID)
+			if err != nil {
+				writeError(w, statusForError(err), err)
+				return
+			}
+			writeJSON(w, http.StatusCreated, response)
+		default:
+			writeMethodNotAllowed(w)
+		}
+		return
+	}
+
+	writeError(w, http.StatusNotFound, fmt.Errorf("route not found"))
+}
+
+func (h *Handler) handleSnapshot(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/snapshots/")
+	if path == "" {
+		writeError(w, http.StatusNotFound, fmt.Errorf("snapshot id is required"))
+		return
+	}
+	parts := strings.Split(path, "/")
+	snapshotID := contracthost.SnapshotID(parts[0])
+
+	if len(parts) == 1 {
+		switch r.Method {
+		case http.MethodGet:
+			response, err := h.service.GetSnapshot(r.Context(), snapshotID)
+			if err != nil {
+				writeError(w, statusForError(err), err)
+				return
+			}
+			writeJSON(w, http.StatusOK, response)
+		case http.MethodDelete:
+			if err := h.service.DeleteSnapshotByID(r.Context(), snapshotID); err != nil {
+				writeError(w, statusForError(err), err)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			writeMethodNotAllowed(w)
+		}
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "restore" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		var req contracthost.RestoreSnapshotRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		response, err := h.service.RestoreSnapshot(r.Context(), snapshotID, req)
+		if err != nil {
+			writeError(w, statusForError(err), err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, response)
 		return
 	}
 

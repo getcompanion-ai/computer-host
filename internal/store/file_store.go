@@ -23,9 +23,10 @@ type persistedOperations struct {
 }
 
 type persistedState struct {
-	Artifacts []model.ArtifactRecord `json:"artifacts"`
-	Machines  []model.MachineRecord  `json:"machines"`
-	Volumes   []model.VolumeRecord   `json:"volumes"`
+	Artifacts []model.ArtifactRecord  `json:"artifacts"`
+	Machines  []model.MachineRecord   `json:"machines"`
+	Volumes   []model.VolumeRecord    `json:"volumes"`
+	Snapshots []model.SnapshotRecord  `json:"snapshots"`
 }
 
 func NewFileStore(statePath string, operationsPath string) (*FileStore, error) {
@@ -274,6 +275,73 @@ func (s *FileStore) DeleteOperation(_ context.Context, machineID contracthost.Ma
 	})
 }
 
+func (s *FileStore) CreateSnapshot(_ context.Context, record model.SnapshotRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.updateState(func(state *persistedState) error {
+		for _, snap := range state.Snapshots {
+			if snap.ID == record.ID {
+				return fmt.Errorf("store: snapshot %q already exists", record.ID)
+			}
+		}
+		state.Snapshots = append(state.Snapshots, record)
+		return nil
+	})
+}
+
+func (s *FileStore) GetSnapshot(_ context.Context, id contracthost.SnapshotID) (*model.SnapshotRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state, err := s.readState()
+	if err != nil {
+		return nil, err
+	}
+	for i := range state.Snapshots {
+		if state.Snapshots[i].ID == id {
+			record := state.Snapshots[i]
+			return &record, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (s *FileStore) ListSnapshotsByMachine(_ context.Context, machineID contracthost.MachineID) ([]model.SnapshotRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state, err := s.readState()
+	if err != nil {
+		return nil, err
+	}
+	var result []model.SnapshotRecord
+	for _, snap := range state.Snapshots {
+		if snap.MachineID == machineID {
+			result = append(result, snap)
+		}
+	}
+	if result == nil {
+		result = []model.SnapshotRecord{}
+	}
+	return result, nil
+}
+
+func (s *FileStore) DeleteSnapshot(_ context.Context, id contracthost.SnapshotID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.updateState(func(state *persistedState) error {
+		for i := range state.Snapshots {
+			if state.Snapshots[i].ID == id {
+				state.Snapshots = append(state.Snapshots[:i], state.Snapshots[i+1:]...)
+				return nil
+			}
+		}
+		return ErrNotFound
+	})
+}
+
 func (s *FileStore) readOperations() (*persistedOperations, error) {
 	var operations persistedOperations
 	if err := readJSONFile(s.operationsPath, &operations); err != nil {
@@ -387,6 +455,7 @@ func emptyPersistedState() persistedState {
 		Artifacts: []model.ArtifactRecord{},
 		Machines:  []model.MachineRecord{},
 		Volumes:   []model.VolumeRecord{},
+		Snapshots: []model.SnapshotRecord{},
 	}
 }
 
@@ -403,6 +472,9 @@ func normalizeState(state *persistedState) {
 	}
 	if state.Volumes == nil {
 		state.Volumes = []model.VolumeRecord{}
+	}
+	if state.Snapshots == nil {
+		state.Snapshots = []model.SnapshotRecord{}
 	}
 }
 

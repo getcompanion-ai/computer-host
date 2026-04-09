@@ -53,13 +53,28 @@ type VolumeRecord struct {
 type MachineOperation string
 
 const (
-	MachineOperationCreate MachineOperation = "create"
-	MachineOperationStop   MachineOperation = "stop"
-	MachineOperationDelete MachineOperation = "delete"
+	MachineOperationCreate   MachineOperation = "create"
+	MachineOperationStop     MachineOperation = "stop"
+	MachineOperationDelete   MachineOperation = "delete"
+	MachineOperationSnapshot MachineOperation = "snapshot"
+	MachineOperationRestore  MachineOperation = "restore"
 )
 
+type SnapshotRecord struct {
+	ID                contracthost.SnapshotID
+	MachineID         contracthost.MachineID
+	Artifact          contracthost.ArtifactRef
+	MemFilePath       string
+	StateFilePath     string
+	DiskPaths         []string
+	SourceRuntimeHost string
+	SourceTapDevice   string
+	CreatedAt         time.Time
+}
+
 type OperationRecord struct {
-	MachineID contracthost.MachineID
-	Type      MachineOperation
-	StartedAt time.Time
+	MachineID  contracthost.MachineID
+	Type       MachineOperation
+	StartedAt  time.Time
+	SnapshotID *contracthost.SnapshotID `json:"snapshot_id,omitempty"`
 }

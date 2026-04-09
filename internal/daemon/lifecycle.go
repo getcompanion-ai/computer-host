@@ -128,6 +128,14 @@ func (d *Daemon) Reconcile(ctx context.Context) error {
 			if err := d.reconcileDelete(ctx, operation.MachineID); err != nil {
 				return err
 			}
+		case model.MachineOperationSnapshot:
+			if err := d.reconcileSnapshot(ctx, operation); err != nil {
+				return err
+			}
+		case model.MachineOperationRestore:
+			if err := d.reconcileRestore(ctx, operation); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("unsupported operation type %q", operation.Type)
 		}
@@ -324,4 +332,37 @@ func (d *Daemon) detachVolumesForMachine(ctx context.Context, machineID contract
 		}
 	}
 	return nil
+}
+
+func (d *Daemon) reconcileSnapshot(ctx context.Context, operation model.OperationRecord) error {
+	if operation.SnapshotID == nil {
+		return d.store.DeleteOperation(ctx, operation.MachineID)
+	}
+	_, err := d.store.GetSnapshot(ctx, *operation.SnapshotID)
+	if err == nil {
+		// Snapshot completed successfully, just clear the journal
+		return d.store.DeleteOperation(ctx, operation.MachineID)
+	}
+	// Snapshot did not complete: clean up partial snapshot directory and resume the machine
+	snapshotDir := filepath.Join(d.config.SnapshotsDir, string(*operation.SnapshotID))
+	_ = os.RemoveAll(snapshotDir)
+
+	// Try to resume the source machine in case it was left paused
+	record, err := d.store.GetMachine(ctx, operation.MachineID)
+	if err == nil && record.Phase == contracthost.MachinePhaseRunning && record.PID > 0 {
+		_ = d.runtime.Resume(ctx, machineToRuntimeState(*record))
+	}
+	return d.store.DeleteOperation(ctx, operation.MachineID)
+}
+
+func (d *Daemon) reconcileRestore(ctx context.Context, operation model.OperationRecord) error {
+	_, err := d.store.GetMachine(ctx, operation.MachineID)
+	if err == nil {
+		// Restore completed, clear journal
+		return d.store.DeleteOperation(ctx, operation.MachineID)
+	}
+	// Restore did not complete: clean up partial machine directory and disk
+	_ = os.RemoveAll(filepath.Dir(d.systemVolumePath(operation.MachineID)))
+	_ = os.RemoveAll(d.machineRuntimeBaseDir(operation.MachineID))
+	return d.store.DeleteOperation(ctx, operation.MachineID)
 }

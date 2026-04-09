@@ -220,6 +220,155 @@ func (r *Runtime) Delete(ctx context.Context, state MachineState) error {
 	return nil
 }
 
+func (r *Runtime) Pause(ctx context.Context, state MachineState) error {
+	client := newAPIClient(state.SocketPath)
+	return client.PatchVm(ctx, VmStatePaused)
+}
+
+func (r *Runtime) Resume(ctx context.Context, state MachineState) error {
+	client := newAPIClient(state.SocketPath)
+	return client.PatchVm(ctx, VmStateResumed)
+}
+
+func (r *Runtime) CreateSnapshot(ctx context.Context, state MachineState, paths SnapshotPaths) error {
+	client := newAPIClient(state.SocketPath)
+	return client.PutSnapshotCreate(ctx, SnapshotCreateParams{
+		MemFilePath:  paths.MemFilePath,
+		SnapshotPath: paths.StateFilePath,
+		SnapshotType: "Full",
+	})
+}
+
+func (r *Runtime) RestoreBoot(ctx context.Context, loadSpec SnapshotLoadSpec, usedNetworks []NetworkAllocation) (*MachineState, error) {
+	cleanup := func(network NetworkAllocation, paths machinePaths, command *exec.Cmd, firecrackerPID int) {
+		if preserveFailureArtifacts() {
+			return
+		}
+		cleanupRunningProcess(firecrackerPID)
+		cleanupStartedProcess(command)
+		_ = r.networkProvisioner.Remove(context.Background(), network)
+		if paths.BaseDir != "" {
+			_ = os.RemoveAll(paths.BaseDir)
+		}
+	}
+
+	var network NetworkAllocation
+	if loadSpec.Network != nil {
+		network = *loadSpec.Network
+	} else {
+		var err error
+		network, err = r.networkAllocator.Allocate(usedNetworks)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	paths, err := buildMachinePaths(r.rootDir, loadSpec.ID, r.firecrackerBinaryPath)
+	if err != nil {
+		cleanup(network, machinePaths{}, nil, 0)
+		return nil, err
+	}
+	if err := os.MkdirAll(paths.LogDir, 0o755); err != nil {
+		cleanup(network, paths, nil, 0)
+		return nil, fmt.Errorf("create machine log dir %q: %w", paths.LogDir, err)
+	}
+	if err := r.networkProvisioner.Ensure(ctx, network); err != nil {
+		cleanup(network, paths, nil, 0)
+		return nil, err
+	}
+
+	command, err := launchJailedFirecracker(paths, loadSpec.ID, r.firecrackerBinaryPath, r.jailerBinaryPath)
+	if err != nil {
+		cleanup(network, paths, nil, 0)
+		return nil, err
+	}
+	firecrackerPID, err := waitForPIDFile(ctx, paths.PIDFilePath)
+	if err != nil {
+		cleanup(network, paths, command, 0)
+		return nil, fmt.Errorf("wait for firecracker pid: %w", err)
+	}
+
+	socketPath := procSocketPath(firecrackerPID)
+	client := newAPIClient(socketPath)
+	if err := waitForSocket(ctx, client, socketPath); err != nil {
+		cleanup(network, paths, command, firecrackerPID)
+		return nil, fmt.Errorf("wait for firecracker socket: %w", err)
+	}
+
+	// Stage snapshot files and disk images into the chroot
+	chrootMemPath, err := stageSnapshotFile(loadSpec.MemFilePath, paths.ChrootRootDir, "memory.bin")
+	if err != nil {
+		cleanup(network, paths, command, firecrackerPID)
+		return nil, fmt.Errorf("stage memory file: %w", err)
+	}
+	chrootStatePath, err := stageSnapshotFile(loadSpec.SnapshotPath, paths.ChrootRootDir, "vmstate.bin")
+	if err != nil {
+		cleanup(network, paths, command, firecrackerPID)
+		return nil, fmt.Errorf("stage vmstate file: %w", err)
+	}
+
+	// Stage root filesystem
+	rootFSName, err := stagedFileName(loadSpec.RootFSPath)
+	if err != nil {
+		cleanup(network, paths, command, firecrackerPID)
+		return nil, fmt.Errorf("rootfs path: %w", err)
+	}
+	if err := linkMachineFile(loadSpec.RootFSPath, filepath.Join(paths.ChrootRootDir, rootFSName)); err != nil {
+		cleanup(network, paths, command, firecrackerPID)
+		return nil, fmt.Errorf("link rootfs into jail: %w", err)
+	}
+
+	// Stage additional drives
+	for driveID, drivePath := range loadSpec.DiskPaths {
+		driveName, err := stagedFileName(drivePath)
+		if err != nil {
+			cleanup(network, paths, command, firecrackerPID)
+			return nil, fmt.Errorf("drive %q path: %w", driveID, err)
+		}
+		if err := linkMachineFile(drivePath, filepath.Join(paths.ChrootRootDir, driveName)); err != nil {
+			cleanup(network, paths, command, firecrackerPID)
+			return nil, fmt.Errorf("link drive %q into jail: %w", driveID, err)
+		}
+	}
+
+	// Load snapshot (replaces the full configure+start sequence)
+	if err := client.PutSnapshotLoad(ctx, SnapshotLoadParams{
+		SnapshotPath: chrootStatePath,
+		MemBackend: &MemBackend{
+			BackendType: "File",
+			BackendPath: chrootMemPath,
+		},
+		ResumeVm: false,
+		NetworkOverrides: []NetworkOverride{
+			{
+				IfaceID:     network.InterfaceID,
+				HostDevName: network.TapName,
+			},
+		},
+	}); err != nil {
+		cleanup(network, paths, command, firecrackerPID)
+		return nil, fmt.Errorf("load snapshot: %w", err)
+	}
+
+	// Resume the restored VM
+	if err := client.PatchVm(ctx, VmStateResumed); err != nil {
+		cleanup(network, paths, command, firecrackerPID)
+		return nil, fmt.Errorf("resume restored vm: %w", err)
+	}
+
+	now := time.Now().UTC()
+	state := MachineState{
+		ID:          loadSpec.ID,
+		Phase:       PhaseRunning,
+		PID:         firecrackerPID,
+		RuntimeHost: network.GuestIP().String(),
+		SocketPath:  socketPath,
+		TapName:     network.TapName,
+		StartedAt:   &now,
+	}
+	return &state, nil
+}
+
 func processExists(pid int) bool {
 	if pid < 1 {
 		return false

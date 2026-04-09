@@ -27,4 +27,8 @@ type Store interface {
 	UpsertOperation(context.Context, model.OperationRecord) error
 	ListOperations(context.Context) ([]model.OperationRecord, error)
 	DeleteOperation(context.Context, contracthost.MachineID) error
+	CreateSnapshot(context.Context, model.SnapshotRecord) error
+	GetSnapshot(context.Context, contracthost.SnapshotID) (*model.SnapshotRecord, error)
+	ListSnapshotsByMachine(context.Context, contracthost.MachineID) ([]model.SnapshotRecord, error)
+	DeleteSnapshot(context.Context, contracthost.SnapshotID) error
 }

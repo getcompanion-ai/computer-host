@@ -18,6 +18,7 @@ type Config struct {
 	OperationsPath        string
 	ArtifactsDir          string
 	MachineDisksDir       string
+	SnapshotsDir          string
 	RuntimeDir            string
 	SocketPath            string
 	EgressInterface       string
@@ -34,6 +35,7 @@ func Load() (Config, error) {
 		OperationsPath:        filepath.Join(rootDir, "state", "ops.json"),
 		ArtifactsDir:          filepath.Join(rootDir, "artifacts"),
 		MachineDisksDir:       filepath.Join(rootDir, "machine-disks"),
+		SnapshotsDir:          filepath.Join(rootDir, "snapshots"),
 		RuntimeDir:            filepath.Join(rootDir, "runtime"),
 		SocketPath:            filepath.Join(rootDir, defaultSocketName),
 		EgressInterface:       strings.TrimSpace(os.Getenv("FIRECRACKER_HOST_EGRESS_INTERFACE")),
@@ -68,6 +70,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.MachineDisksDir) == "" {
 		return fmt.Errorf("machine disks dir is required")
+	}
+	if strings.TrimSpace(c.SnapshotsDir) == "" {
+		return fmt.Errorf("snapshots dir is required")
 	}
 	if strings.TrimSpace(c.RuntimeDir) == "" {
 		return fmt.Errorf("runtime dir is required")

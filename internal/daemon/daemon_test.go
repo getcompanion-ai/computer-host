@@ -15,15 +15,18 @@ import (
 
 	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
+	"github.com/getcompanion-ai/computer-host/internal/model"
 	"github.com/getcompanion-ai/computer-host/internal/store"
 	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
 type fakeRuntime struct {
-	bootState   firecracker.MachineState
-	bootCalls   int
-	deleteCalls []firecracker.MachineState
-	lastSpec    firecracker.MachineSpec
+	bootState    firecracker.MachineState
+	bootCalls    int
+	restoreCalls int
+	deleteCalls  []firecracker.MachineState
+	lastSpec     firecracker.MachineSpec
+	lastLoadSpec firecracker.SnapshotLoadSpec
 }
 
 func (f *fakeRuntime) Boot(_ context.Context, spec firecracker.MachineSpec, _ []firecracker.NetworkAllocation) (*firecracker.MachineState, error) {
@@ -41,6 +44,24 @@ func (f *fakeRuntime) Inspect(state firecracker.MachineState) (*firecracker.Mach
 func (f *fakeRuntime) Delete(_ context.Context, state firecracker.MachineState) error {
 	f.deleteCalls = append(f.deleteCalls, state)
 	return nil
+}
+
+func (f *fakeRuntime) Pause(_ context.Context, _ firecracker.MachineState) error {
+	return nil
+}
+
+func (f *fakeRuntime) Resume(_ context.Context, _ firecracker.MachineState) error {
+	return nil
+}
+
+func (f *fakeRuntime) CreateSnapshot(_ context.Context, _ firecracker.MachineState, _ firecracker.SnapshotPaths) error {
+	return nil
+}
+
+func (f *fakeRuntime) RestoreBoot(_ context.Context, spec firecracker.SnapshotLoadSpec, _ []firecracker.NetworkAllocation) (*firecracker.MachineState, error) {
+	f.restoreCalls++
+	f.lastLoadSpec = spec
+	return &f.bootState, nil
 }
 
 func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
@@ -223,6 +244,219 @@ func TestNewEnsuresBackendSSHKeyPair(t *testing.T) {
 	}
 }
 
+func TestRestoreSnapshotRejectsRunningSourceMachine(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	runtime := &fakeRuntime{}
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID) error { return nil }
+
+	artifactRef := contracthost.ArtifactRef{KernelImageURL: "kernel", RootFSURL: "rootfs"}
+	kernelPath := filepath.Join(root, "artifact-kernel")
+	if err := os.WriteFile(kernelPath, []byte("kernel"), 0o644); err != nil {
+		t.Fatalf("write kernel: %v", err)
+	}
+	if err := fileStore.PutArtifact(context.Background(), model.ArtifactRecord{
+		Ref:             artifactRef,
+		LocalKey:        "artifact",
+		LocalDir:        filepath.Join(root, "artifact"),
+		KernelImagePath: kernelPath,
+		RootFSPath:      filepath.Join(root, "artifact-rootfs"),
+		CreatedAt:       time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+
+	if err := fileStore.CreateMachine(context.Background(), model.MachineRecord{
+		ID:             "source",
+		Artifact:       artifactRef,
+		SystemVolumeID: "source-system",
+		RuntimeHost:    "172.16.0.2",
+		TapDevice:      "fctap0",
+		Phase:          contracthost.MachinePhaseRunning,
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create source machine: %v", err)
+	}
+
+	snapDisk := filepath.Join(root, "snapshots", "snap1", "system.img")
+	if err := os.MkdirAll(filepath.Dir(snapDisk), 0o755); err != nil {
+		t.Fatalf("create snapshot dir: %v", err)
+	}
+	if err := os.WriteFile(snapDisk, []byte("disk"), 0o644); err != nil {
+		t.Fatalf("write snapshot disk: %v", err)
+	}
+	if err := fileStore.CreateSnapshot(context.Background(), model.SnapshotRecord{
+		ID:                "snap1",
+		MachineID:         "source",
+		Artifact:          artifactRef,
+		MemFilePath:       filepath.Join(root, "snapshots", "snap1", "memory.bin"),
+		StateFilePath:     filepath.Join(root, "snapshots", "snap1", "vmstate.bin"),
+		DiskPaths:         []string{snapDisk},
+		SourceRuntimeHost: "172.16.0.2",
+		SourceTapDevice:   "fctap0",
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+
+	_, err = hostDaemon.RestoreSnapshot(context.Background(), "snap1", contracthost.RestoreSnapshotRequest{
+		MachineID: "restored",
+	})
+	if err == nil {
+		t.Fatal("expected restore rejection while source is running")
+	}
+	if !strings.Contains(err.Error(), `source machine "source" is running`) {
+		t.Fatalf("unexpected restore error: %v", err)
+	}
+	if runtime.restoreCalls != 0 {
+		t.Fatalf("restore boot should not run when source machine is still running: got %d", runtime.restoreCalls)
+	}
+
+	ops, err := fileStore.ListOperations(context.Background())
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("operation journal should be empty after handled restore rejection: got %d entries", len(ops))
+	}
+}
+
+func TestRestoreSnapshotUsesSnapshotMetadataWithoutSourceMachine(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	sshListener := listenTestPort(t, int(defaultSSHPort))
+	defer sshListener.Close()
+	vncListener := listenTestPort(t, int(defaultVNCPort))
+	defer vncListener.Close()
+
+	startedAt := time.Unix(1700000099, 0).UTC()
+	runtime := &fakeRuntime{
+		bootState: firecracker.MachineState{
+			ID:          "restored",
+			Phase:       firecracker.PhaseRunning,
+			PID:         1234,
+			RuntimeHost: "127.0.0.1",
+			SocketPath:  filepath.Join(cfg.RuntimeDir, "machines", "restored", "root", "run", "firecracker.sock"),
+			TapName:     "fctap0",
+			StartedAt:   &startedAt,
+		},
+	}
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	var reconfiguredHost string
+	var reconfiguredMachine contracthost.MachineID
+	hostDaemon.reconfigureGuestIdentity = func(_ context.Context, host string, machineID contracthost.MachineID) error {
+		reconfiguredHost = host
+		reconfiguredMachine = machineID
+		return nil
+	}
+
+	artifactRef := contracthost.ArtifactRef{KernelImageURL: "kernel", RootFSURL: "rootfs"}
+	kernelPath := filepath.Join(root, "artifact-kernel")
+	rootFSPath := filepath.Join(root, "artifact-rootfs")
+	if err := os.WriteFile(kernelPath, []byte("kernel"), 0o644); err != nil {
+		t.Fatalf("write kernel: %v", err)
+	}
+	if err := os.WriteFile(rootFSPath, []byte("rootfs"), 0o644); err != nil {
+		t.Fatalf("write rootfs: %v", err)
+	}
+	if err := fileStore.PutArtifact(context.Background(), model.ArtifactRecord{
+		Ref:             artifactRef,
+		LocalKey:        "artifact",
+		LocalDir:        filepath.Join(root, "artifact"),
+		KernelImagePath: kernelPath,
+		RootFSPath:      rootFSPath,
+		CreatedAt:       time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+
+	snapDir := filepath.Join(root, "snapshots", "snap1")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatalf("create snapshot dir: %v", err)
+	}
+	snapDisk := filepath.Join(snapDir, "system.img")
+	if err := os.WriteFile(snapDisk, []byte("disk"), 0o644); err != nil {
+		t.Fatalf("write snapshot disk: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, "memory.bin"), []byte("mem"), 0o644); err != nil {
+		t.Fatalf("write memory snapshot: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, "vmstate.bin"), []byte("state"), 0o644); err != nil {
+		t.Fatalf("write vmstate snapshot: %v", err)
+	}
+	if err := fileStore.CreateSnapshot(context.Background(), model.SnapshotRecord{
+		ID:                "snap1",
+		MachineID:         "source",
+		Artifact:          artifactRef,
+		MemFilePath:       filepath.Join(snapDir, "memory.bin"),
+		StateFilePath:     filepath.Join(snapDir, "vmstate.bin"),
+		DiskPaths:         []string{snapDisk},
+		SourceRuntimeHost: "172.16.0.2",
+		SourceTapDevice:   "fctap0",
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+
+	response, err := hostDaemon.RestoreSnapshot(context.Background(), "snap1", contracthost.RestoreSnapshotRequest{
+		MachineID: "restored",
+	})
+	if err != nil {
+		t.Fatalf("restore snapshot: %v", err)
+	}
+	if response.Machine.ID != "restored" {
+		t.Fatalf("restored machine id mismatch: got %q", response.Machine.ID)
+	}
+	if runtime.restoreCalls != 1 {
+		t.Fatalf("restore boot call count mismatch: got %d want 1", runtime.restoreCalls)
+	}
+	if runtime.lastLoadSpec.Network == nil {
+		t.Fatal("restore boot did not receive snapshot network")
+	}
+	if got := runtime.lastLoadSpec.Network.GuestIP().String(); got != "172.16.0.2" {
+		t.Fatalf("restored guest network mismatch: got %q want %q", got, "172.16.0.2")
+	}
+	if runtime.lastLoadSpec.KernelImagePath != kernelPath {
+		t.Fatalf("restore boot kernel path mismatch: got %q want %q", runtime.lastLoadSpec.KernelImagePath, kernelPath)
+	}
+	if reconfiguredHost != "127.0.0.1" || reconfiguredMachine != "restored" {
+		t.Fatalf("guest identity reconfigure mismatch: host=%q machine=%q", reconfiguredHost, reconfiguredMachine)
+	}
+
+	machine, err := fileStore.GetMachine(context.Background(), "restored")
+	if err != nil {
+		t.Fatalf("get restored machine: %v", err)
+	}
+	if machine.Phase != contracthost.MachinePhaseRunning {
+		t.Fatalf("restored machine phase mismatch: got %q", machine.Phase)
+	}
+
+	ops, err := fileStore.ListOperations(context.Background())
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("operation journal should be empty after successful restore: got %d entries", len(ops))
+	}
+}
+
 func TestCreateMachineRejectsNonHTTPArtifactURLs(t *testing.T) {
 	t.Parallel()
 
@@ -282,6 +516,7 @@ func testConfig(root string) appconfig.Config {
 		OperationsPath:        filepath.Join(root, "state", "ops.json"),
 		ArtifactsDir:          filepath.Join(root, "artifacts"),
 		MachineDisksDir:       filepath.Join(root, "machine-disks"),
+		SnapshotsDir:          filepath.Join(root, "snapshots"),
 		RuntimeDir:            filepath.Join(root, "runtime"),
 		SocketPath:            filepath.Join(root, "firecracker-host.sock"),
 		EgressInterface:       "eth0",

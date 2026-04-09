@@ -146,6 +146,69 @@ func (c *apiClient) PutVsock(ctx context.Context, spec VsockSpec) error {
 	return c.do(ctx, http.MethodPut, "/vsock", body, nil, http.StatusNoContent)
 }
 
+type VmState string
+
+const (
+	VmStatePaused  VmState = "Paused"
+	VmStateResumed VmState = "Resumed"
+)
+
+type vmRequest struct {
+	State VmState `json:"state"`
+}
+
+type vmResponse struct {
+	State string `json:"state"`
+}
+
+type SnapshotCreateParams struct {
+	MemFilePath  string `json:"mem_file_path"`
+	SnapshotPath string `json:"snapshot_path"`
+	SnapshotType string `json:"snapshot_type"`
+}
+
+type SnapshotLoadParams struct {
+	SnapshotPath     string            `json:"snapshot_path"`
+	MemBackend       *MemBackend       `json:"mem_backend,omitempty"`
+	ResumeVm         bool              `json:"resume_vm"`
+	NetworkOverrides []NetworkOverride `json:"network_overrides,omitempty"`
+	VsockOverride    *VsockOverride    `json:"vsock_override,omitempty"`
+}
+
+type MemBackend struct {
+	BackendType string `json:"backend_type"`
+	BackendPath string `json:"backend_path"`
+}
+
+type NetworkOverride struct {
+	IfaceID     string `json:"iface_id"`
+	HostDevName string `json:"host_dev_name"`
+}
+
+type VsockOverride struct {
+	UDSPath string `json:"uds_path"`
+}
+
+func (c *apiClient) PatchVm(ctx context.Context, state VmState) error {
+	return c.do(ctx, http.MethodPatch, "/vm", vmRequest{State: state}, nil, http.StatusNoContent)
+}
+
+func (c *apiClient) GetVm(ctx context.Context) (*vmResponse, error) {
+	var response vmResponse
+	if err := c.do(ctx, http.MethodGet, "/vm", nil, &response, http.StatusOK); err != nil {
+		return nil, err
+	}
+	return &response, nil
+}
+
+func (c *apiClient) PutSnapshotCreate(ctx context.Context, params SnapshotCreateParams) error {
+	return c.do(ctx, http.MethodPut, "/snapshot/create", params, nil, http.StatusNoContent)
+}
+
+func (c *apiClient) PutSnapshotLoad(ctx context.Context, params SnapshotLoadParams) error {
+	return c.do(ctx, http.MethodPut, "/snapshot/load", params, nil, http.StatusNoContent)
+}
+
 func (c *apiClient) do(ctx context.Context, method string, endpoint string, input any, output any, wantStatus int) error {
 	var body io.Reader
 	if input != nil {

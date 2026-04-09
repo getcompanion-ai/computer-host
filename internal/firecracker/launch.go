@@ -272,3 +272,11 @@ func stagedFileName(filePath string) (string, error) {
 	}
 	return name, nil
 }
+
+func stageSnapshotFile(sourcePath string, chrootRootDir string, name string) (string, error) {
+	target := filepath.Join(chrootRootDir, name)
+	if err := linkMachineFile(sourcePath, target); err != nil {
+		return "", err
+	}
+	return name, nil
+}

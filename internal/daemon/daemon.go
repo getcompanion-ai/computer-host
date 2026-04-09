@@ -29,12 +29,18 @@ type Runtime interface {
 	Boot(context.Context, firecracker.MachineSpec, []firecracker.NetworkAllocation) (*firecracker.MachineState, error)
 	Inspect(firecracker.MachineState) (*firecracker.MachineState, error)
 	Delete(context.Context, firecracker.MachineState) error
+	Pause(context.Context, firecracker.MachineState) error
+	Resume(context.Context, firecracker.MachineState) error
+	CreateSnapshot(context.Context, firecracker.MachineState, firecracker.SnapshotPaths) error
+	RestoreBoot(context.Context, firecracker.SnapshotLoadSpec, []firecracker.NetworkAllocation) (*firecracker.MachineState, error)
 }
 
 type Daemon struct {
 	config  appconfig.Config
 	store   store.Store
 	runtime Runtime
+
+	reconfigureGuestIdentity func(context.Context, string, contracthost.MachineID) error
 
 	locksMu       sync.Mutex
 	machineLocks  map[contracthost.MachineID]*sync.Mutex
@@ -51,18 +57,20 @@ func New(cfg appconfig.Config, store store.Store, runtime Runtime) (*Daemon, err
 	if runtime == nil {
 		return nil, fmt.Errorf("runtime is required")
 	}
-	for _, dir := range []string{cfg.ArtifactsDir, cfg.MachineDisksDir, cfg.RuntimeDir} {
+	for _, dir := range []string{cfg.ArtifactsDir, cfg.MachineDisksDir, cfg.SnapshotsDir, cfg.RuntimeDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("create daemon dir %q: %w", dir, err)
 		}
 	}
 	daemon := &Daemon{
-		config:        cfg,
-		store:         store,
-		runtime:       runtime,
-		machineLocks:  make(map[contracthost.MachineID]*sync.Mutex),
-		artifactLocks: make(map[string]*sync.Mutex),
+		config:                   cfg,
+		store:                    store,
+		runtime:                  runtime,
+		reconfigureGuestIdentity: nil,
+		machineLocks:             make(map[contracthost.MachineID]*sync.Mutex),
+		artifactLocks:            make(map[string]*sync.Mutex),
 	}
+	daemon.reconfigureGuestIdentity = daemon.reconfigureGuestIdentityOverSSH
 	if err := daemon.ensureBackendSSHKeyPair(); err != nil {
 		return nil, err
 	}
