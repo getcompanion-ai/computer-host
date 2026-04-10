@@ -26,7 +26,7 @@ func TestLaunchJailedFirecrackerPassesDaemonAndLoggingFlags(t *testing.T) {
 		t.Fatalf("create log dir: %v", err)
 	}
 
-	if _, err := launchJailedFirecracker(paths, "vm-1", "/usr/bin/firecracker", jailerPath); err != nil {
+	if _, err := launchJailedFirecracker(paths, "vm-1", "/usr/bin/firecracker", jailerPath, false); err != nil {
 		t.Fatalf("launch jailed firecracker: %v", err)
 	}
 
@@ -42,6 +42,33 @@ func TestLaunchJailedFirecrackerPassesDaemonAndLoggingFlags(t *testing.T) {
 		if !containsLine(args, want) {
 			t.Fatalf("missing launch argument %q in %v", want, args)
 		}
+	}
+}
+
+func TestLaunchJailedFirecrackerPassesEnablePCIWhenConfigured(t *testing.T) {
+	root := t.TempDir()
+	argsPath := filepath.Join(root, "args.txt")
+	jailerPath := filepath.Join(root, "fake-jailer.sh")
+	script := "#!/bin/sh\nprintf '%s\n' \"$@\" > " + shellQuote(argsPath) + "\n"
+	if err := os.WriteFile(jailerPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake jailer: %v", err)
+	}
+
+	paths, err := buildMachinePaths(root, "vm-1", "/usr/bin/firecracker")
+	if err != nil {
+		t.Fatalf("build machine paths: %v", err)
+	}
+	if err := os.MkdirAll(paths.LogDir, 0o755); err != nil {
+		t.Fatalf("create log dir: %v", err)
+	}
+
+	if _, err := launchJailedFirecracker(paths, "vm-1", "/usr/bin/firecracker", jailerPath, true); err != nil {
+		t.Fatalf("launch jailed firecracker: %v", err)
+	}
+
+	args := waitForFileContents(t, argsPath)
+	if !containsLine(args, "--enable-pci") {
+		t.Fatalf("missing launch argument %q in %v", "--enable-pci", args)
 	}
 }
 

@@ -159,9 +159,11 @@ func (d *Daemon) buildMachineSpec(machineID contracthost.MachineID, artifact *mo
 	drives := make([]firecracker.DriveSpec, 0, len(userVolumes))
 	for i, volume := range userVolumes {
 		drives = append(drives, firecracker.DriveSpec{
-			ID:       fmt.Sprintf("user-%d", i),
-			Path:     volume.Path,
-			ReadOnly: false,
+			ID:        fmt.Sprintf("user-%d", i),
+			Path:      volume.Path,
+			ReadOnly:  false,
+			CacheType: firecracker.DriveCacheTypeUnsafe,
+			IOEngine:  d.config.DriveIOEngine,
 		})
 	}
 
@@ -179,9 +181,9 @@ func (d *Daemon) buildMachineSpec(machineID contracthost.MachineID, artifact *mo
 			ID:        "root_drive",
 			Path:      systemVolumePath,
 			CacheType: firecracker.DriveCacheTypeUnsafe,
-			IOEngine:  firecracker.DriveIOEngineSync,
+			IOEngine:  d.config.DriveIOEngine,
 		},
-		KernelArgs: defaultGuestKernelArgs,
+		KernelArgs: guestKernelArgs(d.config.EnablePCI),
 		Drives:     drives,
 		MMDS:       mmds,
 		Vsock:      guestVsockSpec(machineID),

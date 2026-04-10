@@ -24,12 +24,14 @@ type RuntimeConfig struct {
 	EgressInterface       string
 	FirecrackerBinaryPath string
 	JailerBinaryPath      string
+	EnablePCI             bool
 }
 
 type Runtime struct {
 	rootDir               string
 	firecrackerBinaryPath string
 	jailerBinaryPath      string
+	enablePCI             bool
 	networkAllocator      *NetworkAllocator
 	networkProvisioner    NetworkProvisioner
 }
@@ -69,6 +71,7 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		rootDir:               rootDir,
 		firecrackerBinaryPath: firecrackerBinaryPath,
 		jailerBinaryPath:      jailerBinaryPath,
+		enablePCI:             cfg.EnablePCI,
 		networkAllocator:      allocator,
 		networkProvisioner:    NewIPTapProvisioner(defaultNetworkCIDR, egressInterface),
 	}, nil
@@ -110,7 +113,7 @@ func (r *Runtime) Boot(ctx context.Context, spec MachineSpec, usedNetworks []Net
 		return nil, err
 	}
 
-	command, err := launchJailedFirecracker(paths, spec.ID, r.firecrackerBinaryPath, r.jailerBinaryPath)
+	command, err := launchJailedFirecracker(paths, spec.ID, r.firecrackerBinaryPath, r.jailerBinaryPath, r.enablePCI)
 	if err != nil {
 		cleanup(network, paths, nil, 0)
 		return nil, err
@@ -277,7 +280,7 @@ func (r *Runtime) RestoreBoot(ctx context.Context, loadSpec SnapshotLoadSpec, us
 		return nil, err
 	}
 
-	command, err := launchJailedFirecracker(paths, loadSpec.ID, r.firecrackerBinaryPath, r.jailerBinaryPath)
+	command, err := launchJailedFirecracker(paths, loadSpec.ID, r.firecrackerBinaryPath, r.jailerBinaryPath, r.enablePCI)
 	if err != nil {
 		cleanup(network, paths, nil, 0)
 		return nil, err

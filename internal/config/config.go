@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
@@ -21,6 +22,8 @@ type Config struct {
 	SnapshotsDir          string
 	RuntimeDir            string
 	DiskCloneMode         DiskCloneMode
+	DriveIOEngine         firecracker.DriveIOEngine
+	EnablePCI             bool
 	SocketPath            string
 	HTTPAddr              string
 	EgressInterface       string
@@ -42,6 +45,10 @@ const (
 // Load loads and validates the firecracker-host daemon configuration from the environment.
 func Load() (Config, error) {
 	rootDir := filepath.Clean(strings.TrimSpace(os.Getenv("FIRECRACKER_HOST_ROOT_DIR")))
+	enablePCI, err := loadBool("FIRECRACKER_HOST_ENABLE_PCI")
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		RootDir:               rootDir,
 		StatePath:             filepath.Join(rootDir, "state", "state.json"),
@@ -51,6 +58,8 @@ func Load() (Config, error) {
 		SnapshotsDir:          filepath.Join(rootDir, "snapshots"),
 		RuntimeDir:            filepath.Join(rootDir, "runtime"),
 		DiskCloneMode:         loadDiskCloneMode(os.Getenv("FIRECRACKER_HOST_DISK_CLONE_MODE")),
+		DriveIOEngine:         loadDriveIOEngine(os.Getenv("FIRECRACKER_HOST_DRIVE_IO_ENGINE")),
+		EnablePCI:             enablePCI,
 		SocketPath:            filepath.Join(rootDir, defaultSocketName),
 		HTTPAddr:              strings.TrimSpace(os.Getenv("FIRECRACKER_HOST_HTTP_ADDR")),
 		EgressInterface:       strings.TrimSpace(os.Getenv("FIRECRACKER_HOST_EGRESS_INTERFACE")),
@@ -96,6 +105,9 @@ func (c Config) Validate() error {
 	if err := c.DiskCloneMode.Validate(); err != nil {
 		return err
 	}
+	if err := validateDriveIOEngine(c.DriveIOEngine); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.SocketPath) == "" {
 		return fmt.Errorf("socket path is required")
 	}
@@ -112,6 +124,7 @@ func (c Config) FirecrackerRuntimeConfig() firecracker.RuntimeConfig {
 		EgressInterface:       c.EgressInterface,
 		FirecrackerBinaryPath: c.FirecrackerBinaryPath,
 		JailerBinaryPath:      c.JailerBinaryPath,
+		EnablePCI:             c.EnablePCI,
 	}
 }
 
@@ -131,4 +144,33 @@ func (m DiskCloneMode) Validate() error {
 	default:
 		return fmt.Errorf("FIRECRACKER_HOST_DISK_CLONE_MODE must be %q or %q", DiskCloneModeReflink, DiskCloneModeCopy)
 	}
+}
+
+func loadDriveIOEngine(raw string) firecracker.DriveIOEngine {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return firecracker.DriveIOEngineSync
+	}
+	return firecracker.DriveIOEngine(value)
+}
+
+func validateDriveIOEngine(engine firecracker.DriveIOEngine) error {
+	switch engine {
+	case firecracker.DriveIOEngineSync, firecracker.DriveIOEngineAsync:
+		return nil
+	default:
+		return fmt.Errorf("FIRECRACKER_HOST_DRIVE_IO_ENGINE must be %q or %q", firecracker.DriveIOEngineSync, firecracker.DriveIOEngineAsync)
+	}
+}
+
+func loadBool(name string) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return false, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean: %w", name, err)
+	}
+	return parsed, nil
 }

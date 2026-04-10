@@ -97,12 +97,51 @@ func cloneFile(source string, target string) error {
 func cloneDiskFile(source string, target string, mode appconfig.DiskCloneMode) error {
 	switch mode {
 	case appconfig.DiskCloneModeReflink:
-		return reflinkFile(source, target)
+		if err := reflinkFile(source, target); err != nil {
+			return reflinkRequiredError(err)
+		}
+		return nil
 	case appconfig.DiskCloneModeCopy:
 		return cloneFile(source, target)
 	default:
 		return fmt.Errorf("unsupported disk clone mode %q", mode)
 	}
+}
+
+func validateDiskCloneBackend(cfg appconfig.Config) error {
+	if cfg.DiskCloneMode != appconfig.DiskCloneModeReflink {
+		return nil
+	}
+
+	sourceFile, err := os.CreateTemp(cfg.ArtifactsDir, ".reflink-probe-source-*")
+	if err != nil {
+		return fmt.Errorf("create reflink probe source in %q: %w", cfg.ArtifactsDir, err)
+	}
+	sourcePath := sourceFile.Name()
+	defer func() {
+		_ = os.Remove(sourcePath)
+	}()
+
+	if _, err := sourceFile.WriteString("reflink-probe"); err != nil {
+		_ = sourceFile.Close()
+		return fmt.Errorf("write reflink probe source %q: %w", sourcePath, err)
+	}
+	if err := sourceFile.Close(); err != nil {
+		return fmt.Errorf("close reflink probe source %q: %w", sourcePath, err)
+	}
+
+	targetPath := filepath.Join(cfg.MachineDisksDir, "."+filepath.Base(sourcePath)+".target")
+	defer func() {
+		_ = os.Remove(targetPath)
+	}()
+	if err := cloneDiskFile(sourcePath, targetPath, cfg.DiskCloneMode); err != nil {
+		return fmt.Errorf("validate disk clone backend from artifacts dir %q to machine disks dir %q: %w", cfg.ArtifactsDir, cfg.MachineDisksDir, err)
+	}
+	return nil
+}
+
+func reflinkRequiredError(err error) error {
+	return fmt.Errorf("FIRECRACKER_HOST_DISK_CLONE_MODE=reflink requires a CoW filesystem with reflink support across artifacts and machine-disks; mount FIRECRACKER_HOST_ROOT_DIR on XFS with reflink=1 or Btrfs, preferably on local NVMe, or set FIRECRACKER_HOST_DISK_CLONE_MODE=copy for the slow full-copy fallback: %w", err)
 }
 
 func reflinkFile(source string, target string) error {

@@ -758,10 +758,27 @@ func testConfig(root string) appconfig.Config {
 		SnapshotsDir:          filepath.Join(root, "snapshots"),
 		RuntimeDir:            filepath.Join(root, "runtime"),
 		DiskCloneMode:         appconfig.DiskCloneModeCopy,
+		DriveIOEngine:         firecracker.DriveIOEngineSync,
 		SocketPath:            filepath.Join(root, "firecracker-host.sock"),
 		EgressInterface:       "eth0",
 		FirecrackerBinaryPath: "/usr/bin/firecracker",
 		JailerBinaryPath:      "/usr/bin/jailer",
+	}
+}
+
+func TestGuestKernelArgsDisablesPCIByDefault(t *testing.T) {
+	t.Parallel()
+
+	if got := guestKernelArgs(false); !strings.Contains(got, "pci=off") {
+		t.Fatalf("guestKernelArgs(false) = %q, want pci=off", got)
+	}
+}
+
+func TestGuestKernelArgsRemovesPCIOffWhenPCIEnabled(t *testing.T) {
+	t.Parallel()
+
+	if got := guestKernelArgs(true); strings.Contains(got, "pci=off") {
+		t.Fatalf("guestKernelArgs(true) = %q, want no pci=off", got)
 	}
 }
 

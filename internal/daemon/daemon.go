@@ -8,21 +8,22 @@ import (
 	"sync"
 	"time"
 
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
 	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
 	"github.com/getcompanion-ai/computer-host/internal/store"
+	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
 const (
-	defaultGuestKernelArgs  = "console=ttyS0 reboot=k panic=1 pci=off"
-	defaultGuestMemoryMiB   = int64(3072)
-	defaultGuestVCPUs       = int64(2)
-	defaultSSHPort          = uint16(2222)
-	defaultVNCPort          = uint16(6080)
-	defaultCopyBufferSize   = 1024 * 1024
-	defaultGuestDialTimeout = 500 * time.Millisecond
+	defaultGuestKernelArgs      = "console=ttyS0 reboot=k panic=1"
+	defaultGuestKernelArgsNoPCI = defaultGuestKernelArgs + " pci=off"
+	defaultGuestMemoryMiB       = int64(3072)
+	defaultGuestVCPUs           = int64(2)
+	defaultSSHPort              = uint16(2222)
+	defaultVNCPort              = uint16(6080)
+	defaultCopyBufferSize       = 1024 * 1024
+	defaultGuestDialTimeout     = 500 * time.Millisecond
 )
 
 type Runtime interface {
@@ -72,6 +73,9 @@ func New(cfg appconfig.Config, store store.Store, runtime Runtime) (*Daemon, err
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("create daemon dir %q: %w", dir, err)
 		}
+	}
+	if err := validateDiskCloneBackend(cfg); err != nil {
+		return nil, err
 	}
 	daemon := &Daemon{
 		config:                   cfg,
@@ -126,4 +130,11 @@ func (d *Daemon) lockArtifact(key string) func() {
 
 	lock.Lock()
 	return lock.Unlock
+}
+
+func guestKernelArgs(enablePCI bool) string {
+	if enablePCI {
+		return defaultGuestKernelArgs
+	}
+	return defaultGuestKernelArgsNoPCI
 }

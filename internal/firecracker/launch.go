@@ -66,9 +66,8 @@ func configureMachine(ctx context.Context, client *apiClient, paths machinePaths
 	return nil
 }
 
-func launchJailedFirecracker(paths machinePaths, machineID MachineID, firecrackerBinaryPath string, jailerBinaryPath string) (*exec.Cmd, error) {
-	command := exec.Command(
-		jailerBinaryPath,
+func launchJailedFirecracker(paths machinePaths, machineID MachineID, firecrackerBinaryPath string, jailerBinaryPath string, enablePCI bool) (*exec.Cmd, error) {
+	args := []string{
 		"--id", string(machineID),
 		"--uid", strconv.Itoa(os.Getuid()),
 		"--gid", strconv.Itoa(os.Getgid()),
@@ -83,7 +82,11 @@ func launchJailedFirecracker(paths machinePaths, machineID MachineID, firecracke
 		"--level", defaultFirecrackerLogLevel,
 		"--show-level",
 		"--show-log-origin",
-	)
+	}
+	if enablePCI {
+		args = append(args, "--enable-pci")
+	}
+	command := exec.Command(jailerBinaryPath, args...)
 	if err := command.Start(); err != nil {
 		return nil, fmt.Errorf("start jailer: %w", err)
 	}
