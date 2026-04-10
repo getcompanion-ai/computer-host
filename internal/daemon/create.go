@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"time"
 
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
 	"github.com/getcompanion-ai/computer-host/internal/store"
+	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
 func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachineRequest) (*contracthost.CreateMachineResponse, error) {
@@ -66,8 +66,8 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	if err := os.MkdirAll(filepath.Dir(systemVolumePath), 0o755); err != nil {
 		return nil, fmt.Errorf("create system volume dir for %q: %w", req.MachineID, err)
 	}
-	if err := cowCopyFile(artifact.RootFSPath, systemVolumePath); err != nil {
-		return nil, err
+	if err := cloneDiskFile(artifact.RootFSPath, systemVolumePath, d.config.DiskCloneMode); err != nil {
+		return nil, fmt.Errorf("clone rootfs for %q: %w", req.MachineID, err)
 	}
 	removeSystemVolumeOnFailure := true
 	defer func() {

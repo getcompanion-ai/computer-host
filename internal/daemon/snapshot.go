@@ -5,17 +5,16 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
 	"github.com/getcompanion-ai/computer-host/internal/store"
+	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
 func (d *Daemon) CreateSnapshot(ctx context.Context, machineID contracthost.MachineID, req contracthost.CreateSnapshotRequest) (*contracthost.CreateSnapshotResponse, error) {
@@ -104,7 +103,7 @@ func (d *Daemon) CreateSnapshot(ctx context.Context, machineID contracthost.Mach
 		return nil, fmt.Errorf("get system volume: %w", err)
 	}
 	systemDiskTarget := filepath.Join(snapshotDir, "system.img")
-	if err := cowCopyFile(systemVolume.Path, systemDiskTarget); err != nil {
+	if err := cloneDiskFile(systemVolume.Path, systemDiskTarget, d.config.DiskCloneMode); err != nil {
 		_ = d.runtime.Resume(ctx, runtimeState)
 		_ = os.RemoveAll(snapshotDir)
 		return nil, fmt.Errorf("copy system disk: %w", err)
@@ -119,7 +118,7 @@ func (d *Daemon) CreateSnapshot(ctx context.Context, machineID contracthost.Mach
 		}
 		driveID := fmt.Sprintf("user-%d", i)
 		targetPath := filepath.Join(snapshotDir, driveID+".img")
-		if err := cowCopyFile(volume.Path, targetPath); err != nil {
+		if err := cloneDiskFile(volume.Path, targetPath, d.config.DiskCloneMode); err != nil {
 			_ = d.runtime.Resume(ctx, runtimeState)
 			_ = os.RemoveAll(snapshotDir)
 			return nil, fmt.Errorf("copy attached volume %q: %w", volumeID, err)
@@ -303,7 +302,7 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		clearOperation = true
 		return nil, fmt.Errorf("snapshot %q is missing vmstate artifact", snapshotID)
 	}
-	if err := cowCopyFile(systemDiskPath.LocalPath, newSystemDiskPath); err != nil {
+	if err := cloneDiskFile(systemDiskPath.LocalPath, newSystemDiskPath, d.config.DiskCloneMode); err != nil {
 		clearOperation = true
 		return nil, fmt.Errorf("copy system disk for restore: %w", err)
 	}
@@ -320,7 +319,7 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		driveID := strings.TrimSuffix(name, filepath.Ext(name))
 		volumeID := contracthost.VolumeID(fmt.Sprintf("%s-%s", req.MachineID, driveID))
 		volumePath := filepath.Join(d.config.MachineDisksDir, string(req.MachineID), name)
-		if err := cowCopyFile(restored.LocalPath, volumePath); err != nil {
+		if err := cloneDiskFile(restored.LocalPath, volumePath, d.config.DiskCloneMode); err != nil {
 			clearOperation = true
 			return nil, fmt.Errorf("copy restored drive %q: %w", driveID, err)
 		}
@@ -595,20 +594,4 @@ func moveFile(src, dst string) error {
 		return err
 	}
 	return os.Remove(src)
-}
-
-func cowCopyFile(source string, target string) error {
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return fmt.Errorf("create target dir for %q: %w", target, err)
-	}
-	cmd := exec.Command("cp", "--reflink=auto", "--sparse=always", source, target)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		if cloneErr := cloneFile(source, target); cloneErr == nil {
-			return nil
-		} else {
-			return fmt.Errorf("cow copy %q to %q: cp failed: %w: %s; clone fallback failed: %w", source, target, err, string(output), cloneErr)
-		}
-	}
-	return nil
 }

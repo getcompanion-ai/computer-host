@@ -20,6 +20,7 @@ type Config struct {
 	MachineDisksDir       string
 	SnapshotsDir          string
 	RuntimeDir            string
+	DiskCloneMode         DiskCloneMode
 	SocketPath            string
 	HTTPAddr              string
 	EgressInterface       string
@@ -27,6 +28,16 @@ type Config struct {
 	JailerBinaryPath      string
 	GuestLoginCAPublicKey string
 }
+
+// DiskCloneMode controls how the daemon materializes writable machine disks.
+type DiskCloneMode string
+
+const (
+	// DiskCloneModeReflink requires an O(1) copy-on-write clone and never falls back to a full copy.
+	DiskCloneModeReflink DiskCloneMode = "reflink"
+	// DiskCloneModeCopy performs a full sparse copy. Use only for local development or emergency fallback.
+	DiskCloneModeCopy DiskCloneMode = "copy"
+)
 
 // Load loads and validates the firecracker-host daemon configuration from the environment.
 func Load() (Config, error) {
@@ -39,6 +50,7 @@ func Load() (Config, error) {
 		MachineDisksDir:       filepath.Join(rootDir, "machine-disks"),
 		SnapshotsDir:          filepath.Join(rootDir, "snapshots"),
 		RuntimeDir:            filepath.Join(rootDir, "runtime"),
+		DiskCloneMode:         loadDiskCloneMode(os.Getenv("FIRECRACKER_HOST_DISK_CLONE_MODE")),
 		SocketPath:            filepath.Join(rootDir, defaultSocketName),
 		HTTPAddr:              strings.TrimSpace(os.Getenv("FIRECRACKER_HOST_HTTP_ADDR")),
 		EgressInterface:       strings.TrimSpace(os.Getenv("FIRECRACKER_HOST_EGRESS_INTERFACE")),
@@ -81,6 +93,9 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.RuntimeDir) == "" {
 		return fmt.Errorf("runtime dir is required")
 	}
+	if err := c.DiskCloneMode.Validate(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.SocketPath) == "" {
 		return fmt.Errorf("socket path is required")
 	}
@@ -97,5 +112,23 @@ func (c Config) FirecrackerRuntimeConfig() firecracker.RuntimeConfig {
 		EgressInterface:       c.EgressInterface,
 		FirecrackerBinaryPath: c.FirecrackerBinaryPath,
 		JailerBinaryPath:      c.JailerBinaryPath,
+	}
+}
+
+func loadDiskCloneMode(raw string) DiskCloneMode {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return DiskCloneModeReflink
+	}
+	return DiskCloneMode(value)
+}
+
+// Validate reports whether the clone mode is safe to use.
+func (m DiskCloneMode) Validate() error {
+	switch m {
+	case DiskCloneModeReflink, DiskCloneModeCopy:
+		return nil
+	default:
+		return fmt.Errorf("FIRECRACKER_HOST_DISK_CLONE_MODE must be %q or %q", DiskCloneModeReflink, DiskCloneModeCopy)
 	}
 }

@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
 	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
 	"github.com/getcompanion-ai/computer-host/internal/store"
+	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
 type fakeRuntime struct {
@@ -757,6 +757,7 @@ func testConfig(root string) appconfig.Config {
 		MachineDisksDir:       filepath.Join(root, "machine-disks"),
 		SnapshotsDir:          filepath.Join(root, "snapshots"),
 		RuntimeDir:            filepath.Join(root, "runtime"),
+		DiskCloneMode:         appconfig.DiskCloneModeCopy,
 		SocketPath:            filepath.Join(root, "firecracker-host.sock"),
 		EgressInterface:       "eth0",
 		FirecrackerBinaryPath: "/usr/bin/firecracker",

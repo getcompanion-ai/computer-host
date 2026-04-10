@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+
+	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
 )
 
-func TestCloneFilePreservesSparseDiskUsage(t *testing.T) {
+func TestCloneDiskFileCopyPreservesSparseDiskUsage(t *testing.T) {
 	root := t.TempDir()
 	sourcePath := filepath.Join(root, "source.img")
 	targetPath := filepath.Join(root, "target.img")
@@ -46,7 +48,7 @@ func TestCloneFilePreservesSparseDiskUsage(t *testing.T) {
 		t.Skip("temp filesystem does not expose sparse allocation savings")
 	}
 
-	if err := cloneFile(sourcePath, targetPath); err != nil {
+	if err := cloneDiskFile(sourcePath, targetPath, appconfig.DiskCloneModeCopy); err != nil {
 		t.Fatalf("clone sparse file: %v", err)
 	}
 
@@ -78,6 +80,29 @@ func TestCloneFilePreservesSparseDiskUsage(t *testing.T) {
 	}
 	if !bytes.Equal(targetData[4:4+(1<<20)], make([]byte, 1<<20)) {
 		t.Fatal("target hole contents were not zeroed")
+	}
+}
+
+func TestCloneDiskFileReflinkMode(t *testing.T) {
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "source.img")
+	targetPath := filepath.Join(root, "target.img")
+
+	if err := os.WriteFile(sourcePath, []byte("rootfs"), 0o644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	err := cloneDiskFile(sourcePath, targetPath, appconfig.DiskCloneModeReflink)
+	if err != nil {
+		t.Skipf("temp filesystem does not support reflinks: %v", err)
+	}
+
+	targetData, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read target file: %v", err)
+	}
+	if !bytes.Equal(targetData, []byte("rootfs")) {
+		t.Fatalf("target data mismatch: %q", string(targetData))
 	}
 }
 

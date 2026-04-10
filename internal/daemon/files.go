@@ -13,7 +13,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
+	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
 	contracthost "github.com/getcompanion-ai/computer-host/contract"
@@ -88,6 +90,70 @@ func cloneFile(source string, target string) error {
 	}
 	if err := syncDir(filepath.Dir(target)); err != nil {
 		return err
+	}
+	return nil
+}
+
+func cloneDiskFile(source string, target string, mode appconfig.DiskCloneMode) error {
+	switch mode {
+	case appconfig.DiskCloneModeReflink:
+		return reflinkFile(source, target)
+	case appconfig.DiskCloneModeCopy:
+		return cloneFile(source, target)
+	default:
+		return fmt.Errorf("unsupported disk clone mode %q", mode)
+	}
+}
+
+func reflinkFile(source string, target string) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return fmt.Errorf("create target dir for %q: %w", target, err)
+	}
+
+	sourceFile, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("open source file %q: %w", source, err)
+	}
+	defer func() {
+		_ = sourceFile.Close()
+	}()
+
+	sourceInfo, err := sourceFile.Stat()
+	if err != nil {
+		return fmt.Errorf("stat source file %q: %w", source, err)
+	}
+
+	tmpPath := target + ".tmp"
+	targetFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, sourceInfo.Mode().Perm())
+	if err != nil {
+		return fmt.Errorf("open target file %q: %w", tmpPath, err)
+	}
+
+	if err := ioctlFileClone(targetFile, sourceFile); err != nil {
+		_ = targetFile.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("reflink clone %q to %q: %w", source, tmpPath, err)
+	}
+	if err := targetFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close target file %q: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, target); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("rename target file %q to %q: %w", tmpPath, target, err)
+	}
+	if err := syncDir(filepath.Dir(target)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ioctlFileClone(targetFile *os.File, sourceFile *os.File) error {
+	const ficlone = 0x40049409
+
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, targetFile.Fd(), ficlone, sourceFile.Fd())
+	if errno != 0 {
+		return errno
 	}
 	return nil
 }
