@@ -52,19 +52,27 @@ func (d *Daemon) GetStorageReport(ctx context.Context) (*contracthost.GetStorage
 		}
 	}
 
-	machineUsage := make([]contracthost.MachineStorageUsage, 0, len(volumes))
+	machineUsageByID := make(map[contracthost.MachineID]contracthost.MachineStorageUsage)
 	for _, volume := range volumes {
-		if volume.AttachedMachineID == nil || volume.Kind != contracthost.VolumeKindSystem {
+		if volume.AttachedMachineID == nil {
 			continue
 		}
 		bytes, err := fileSize(volume.Path)
 		if err != nil {
 			return nil, err
 		}
-		machineUsage = append(machineUsage, contracthost.MachineStorageUsage{
-			MachineID:   *volume.AttachedMachineID,
-			SystemBytes: bytes,
-		})
+		usage := machineUsageByID[*volume.AttachedMachineID]
+		usage.MachineID = *volume.AttachedMachineID
+		if volume.Kind == contracthost.VolumeKindSystem {
+			usage.SystemBytes += bytes
+		} else {
+			usage.UserBytes += bytes
+		}
+		machineUsageByID[*volume.AttachedMachineID] = usage
+	}
+	machineUsage := make([]contracthost.MachineStorageUsage, 0, len(machineUsageByID))
+	for _, usage := range machineUsageByID {
+		machineUsage = append(machineUsage, usage)
 	}
 
 	snapshotUsage := make([]contracthost.SnapshotStorageUsage, 0, len(snapshots))

@@ -17,6 +17,7 @@ type Machine struct {
 }
 
 type GuestConfig struct {
+	Hostname          string               `json:"hostname,omitempty"`
 	AuthorizedKeys    []string           `json:"authorized_keys,omitempty"`
 	TrustedUserCAKeys []string           `json:"trusted_user_ca_keys,omitempty"`
 	LoginWebhook      *GuestLoginWebhook `json:"login_webhook,omitempty"`

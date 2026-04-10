@@ -39,6 +39,16 @@ func configureMachine(ctx context.Context, client *apiClient, paths machinePaths
 	if err := client.PutNetworkInterface(ctx, network); err != nil {
 		return fmt.Errorf("put network interface: %w", err)
 	}
+	if spec.MMDS != nil {
+		if err := client.PutMMDSConfig(ctx, *spec.MMDS); err != nil {
+			return fmt.Errorf("put mmds config: %w", err)
+		}
+		if spec.MMDS.Data != nil {
+			if err := client.PutMMDS(ctx, spec.MMDS.Data); err != nil {
+				return fmt.Errorf("put mmds payload: %w", err)
+			}
+		}
+	}
 	if err := client.PutEntropy(ctx); err != nil {
 		return fmt.Errorf("put entropy device: %w", err)
 	}
@@ -97,12 +107,14 @@ func stageMachineFiles(spec MachineSpec, paths machinePaths) (MachineSpec, error
 
 	rootFSPath, err := stagedFileName(spec.RootFSPath)
 	if err != nil {
-		return MachineSpec{}, fmt.Errorf("rootfs path: %w", err)
+		return MachineSpec{}, fmt.Errorf("root drive path: %w", err)
 	}
 	if err := linkMachineFile(spec.RootFSPath, filepath.Join(paths.ChrootRootDir, rootFSPath)); err != nil {
-		return MachineSpec{}, fmt.Errorf("link rootfs into jail: %w", err)
+		return MachineSpec{}, fmt.Errorf("link root drive into jail: %w", err)
 	}
 	staged.RootFSPath = rootFSPath
+	staged.RootDrive = spec.rootDrive()
+	staged.RootDrive.Path = rootFSPath
 
 	staged.Drives = make([]DriveSpec, len(spec.Drives))
 	for i, drive := range spec.Drives {
@@ -174,6 +186,8 @@ func additionalDriveRequests(spec MachineSpec) []driveRequest {
 			IsReadOnly:   drive.ReadOnly,
 			IsRootDevice: false,
 			PathOnHost:   drive.Path,
+			CacheType:    drive.CacheType,
+			IOEngine:     drive.IOEngine,
 		})
 	}
 	return requests
@@ -249,11 +263,14 @@ func linkMachineFile(source string, target string) error {
 }
 
 func rootDriveRequest(spec MachineSpec) driveRequest {
+	root := spec.rootDrive()
 	return driveRequest{
-		DriveID:      defaultRootDriveID,
-		IsReadOnly:   false,
+		DriveID:      root.ID,
+		IsReadOnly:   root.ReadOnly,
 		IsRootDevice: true,
-		PathOnHost:   spec.RootFSPath,
+		PathOnHost:   root.Path,
+		CacheType:    root.CacheType,
+		IOEngine:     root.IOEngine,
 	}
 }
 

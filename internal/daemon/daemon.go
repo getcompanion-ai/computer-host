@@ -43,6 +43,7 @@ type Daemon struct {
 
 	reconfigureGuestIdentity func(context.Context, string, contracthost.MachineID) error
 	readGuestSSHPublicKey    func(context.Context, string) (string, error)
+	syncGuestFilesystem      func(context.Context, string) error
 
 	locksMu       sync.Mutex
 	machineLocks  map[contracthost.MachineID]*sync.Mutex
@@ -84,6 +85,7 @@ func New(cfg appconfig.Config, store store.Store, runtime Runtime) (*Daemon, err
 	}
 	daemon.reconfigureGuestIdentity = daemon.reconfigureGuestIdentityOverSSH
 	daemon.readGuestSSHPublicKey = readGuestSSHPublicKey
+	daemon.syncGuestFilesystem = daemon.syncGuestFilesystemOverSSH
 	if err := daemon.ensureBackendSSHKeyPair(); err != nil {
 		return nil, err
 	}

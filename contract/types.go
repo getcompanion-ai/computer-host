@@ -9,9 +9,10 @@ type VolumeID string
 type VolumeKind string
 
 const (
-	MachinePhaseRunning MachinePhase = "running"
-	MachinePhaseStopped MachinePhase = "stopped"
-	MachinePhaseFailed  MachinePhase = "failed"
+	MachinePhaseStarting MachinePhase = "starting"
+	MachinePhaseRunning  MachinePhase = "running"
+	MachinePhaseStopped  MachinePhase = "stopped"
+	MachinePhaseFailed   MachinePhase = "failed"
 )
 
 const (

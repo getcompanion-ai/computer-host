@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -108,6 +110,22 @@ func (d *Daemon) CreateSnapshot(ctx context.Context, machineID contracthost.Mach
 		return nil, fmt.Errorf("copy system disk: %w", err)
 	}
 	diskPaths = append(diskPaths, systemDiskTarget)
+	for i, volumeID := range record.UserVolumeIDs {
+		volume, err := d.store.GetVolume(ctx, volumeID)
+		if err != nil {
+			_ = d.runtime.Resume(ctx, runtimeState)
+			_ = os.RemoveAll(snapshotDir)
+			return nil, fmt.Errorf("get attached volume %q: %w", volumeID, err)
+		}
+		driveID := fmt.Sprintf("user-%d", i)
+		targetPath := filepath.Join(snapshotDir, driveID+".img")
+		if err := cowCopyFile(volume.Path, targetPath); err != nil {
+			_ = d.runtime.Resume(ctx, runtimeState)
+			_ = os.RemoveAll(snapshotDir)
+			return nil, fmt.Errorf("copy attached volume %q: %w", volumeID, err)
+		}
+		diskPaths = append(diskPaths, targetPath)
+	}
 
 	// Resume the source VM
 	if err := d.runtime.Resume(ctx, runtimeState); err != nil {
@@ -132,6 +150,12 @@ func (d *Daemon) CreateSnapshot(ctx context.Context, machineID contracthost.Mach
 		return nil, fmt.Errorf("move vmstate file: %w", err)
 	}
 
+	artifacts, err := buildSnapshotArtifacts(dstMemPath, dstStatePath, diskPaths)
+	if err != nil {
+		_ = os.RemoveAll(snapshotDir)
+		return nil, fmt.Errorf("build snapshot artifacts: %w", err)
+	}
+
 	now := time.Now().UTC()
 	snapshotRecord := model.SnapshotRecord{
 		ID:                snapshotID,
@@ -140,6 +164,7 @@ func (d *Daemon) CreateSnapshot(ctx context.Context, machineID contracthost.Mach
 		MemFilePath:       dstMemPath,
 		StateFilePath:     dstStatePath,
 		DiskPaths:         diskPaths,
+		Artifacts:         artifacts,
 		SourceRuntimeHost: record.RuntimeHost,
 		SourceTapDevice:   record.TapDevice,
 		CreatedAt:         now,
@@ -151,25 +176,60 @@ func (d *Daemon) CreateSnapshot(ctx context.Context, machineID contracthost.Mach
 
 	clearOperation = true
 	return &contracthost.CreateSnapshotResponse{
-		Snapshot: snapshotToContract(snapshotRecord),
+		Snapshot:  snapshotToContract(snapshotRecord),
+		Artifacts: snapshotArtifactsToContract(snapshotRecord.Artifacts),
 	}, nil
+}
+
+func (d *Daemon) UploadSnapshot(ctx context.Context, snapshotID contracthost.SnapshotID, req contracthost.UploadSnapshotRequest) (*contracthost.UploadSnapshotResponse, error) {
+	snapshot, err := d.store.GetSnapshot(ctx, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+	artifactIndex := make(map[string]model.SnapshotArtifactRecord, len(snapshot.Artifacts))
+	for _, artifact := range snapshot.Artifacts {
+		artifactIndex[artifact.ID] = artifact
+	}
+
+	response := &contracthost.UploadSnapshotResponse{
+		Artifacts: make([]contracthost.UploadedSnapshotArtifact, 0, len(req.Artifacts)),
+	}
+	for _, upload := range req.Artifacts {
+		artifact, ok := artifactIndex[upload.ArtifactID]
+		if !ok {
+			return nil, fmt.Errorf("snapshot %q artifact %q not found", snapshotID, upload.ArtifactID)
+		}
+		completedParts, err := uploadSnapshotArtifact(ctx, artifact.LocalPath, upload.Parts)
+		if err != nil {
+			return nil, fmt.Errorf("upload snapshot artifact %q: %w", upload.ArtifactID, err)
+		}
+		response.Artifacts = append(response.Artifacts, contracthost.UploadedSnapshotArtifact{
+			ArtifactID:     upload.ArtifactID,
+			CompletedParts: completedParts,
+		})
+	}
+
+	return response, nil
 }
 
 func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.SnapshotID, req contracthost.RestoreSnapshotRequest) (*contracthost.RestoreSnapshotResponse, error) {
 	if err := validateMachineID(req.MachineID); err != nil {
 		return nil, err
 	}
+	if req.Snapshot.SnapshotID != "" && req.Snapshot.SnapshotID != snapshotID {
+		return nil, fmt.Errorf("snapshot id mismatch: path=%q payload=%q", snapshotID, req.Snapshot.SnapshotID)
+	}
+	if err := validateArtifactRef(req.Artifact); err != nil {
+		return nil, err
+	}
 
 	unlock := d.lockMachine(req.MachineID)
 	defer unlock()
 
-	snap, err := d.store.GetSnapshot(ctx, snapshotID)
-	if err != nil {
-		return nil, err
-	}
-
 	if _, err := d.store.GetMachine(ctx, req.MachineID); err == nil {
 		return nil, fmt.Errorf("machine %q already exists", req.MachineID)
+	} else if err != nil && err != store.ErrNotFound {
+		return nil, err
 	}
 
 	if err := d.store.UpsertOperation(ctx, model.OperationRecord{
@@ -188,55 +248,90 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		}
 	}()
 
-	sourceMachine, err := d.store.GetMachine(ctx, snap.MachineID)
-	switch {
-	case err == nil && sourceMachine.Phase == contracthost.MachinePhaseRunning:
-		clearOperation = true
-		return nil, fmt.Errorf("restore from snapshot %q while source machine %q is running is not supported yet", snapshotID, snap.MachineID)
-	case err != nil && err != store.ErrNotFound:
-		return nil, fmt.Errorf("get source machine for restore: %w", err)
-	}
-
 	usedNetworks, err := d.listRunningNetworks(ctx, req.MachineID)
 	if err != nil {
 		return nil, err
 	}
-	restoreNetwork, err := restoreNetworkFromSnapshot(snap)
+	restoreNetwork, err := d.resolveRestoreNetwork(ctx, snapshotID, req.Snapshot)
 	if err != nil {
 		clearOperation = true
 		return nil, err
 	}
 	if networkAllocationInUse(restoreNetwork, usedNetworks) {
 		clearOperation = true
-		return nil, fmt.Errorf("snapshot %q restore network %q (%s) is already in use", snapshotID, restoreNetwork.TapName, restoreNetwork.GuestIP())
+		return nil, fmt.Errorf("restore network for snapshot %q is still in use on this host (runtime_host=%s tap_device=%s)", snapshotID, restoreNetwork.GuestIP(), restoreNetwork.TapName)
 	}
 
-	artifact, err := d.store.GetArtifact(ctx, snap.Artifact)
+	artifact, err := d.ensureArtifact(ctx, req.Artifact)
 	if err != nil {
-		return nil, fmt.Errorf("get artifact for restore: %w", err)
+		return nil, fmt.Errorf("ensure artifact for restore: %w", err)
 	}
+
+	stagingDir := filepath.Join(d.config.SnapshotsDir, string(snapshotID), "restores", string(req.MachineID))
+	restoredArtifacts, err := downloadDurableSnapshotArtifacts(ctx, stagingDir, req.Snapshot.Artifacts)
+	if err != nil {
+		_ = os.RemoveAll(stagingDir)
+		clearOperation = true
+		return nil, fmt.Errorf("download durable snapshot artifacts: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(stagingDir) }()
 
 	// COW-copy system disk from snapshot to new machine's disk dir.
 	newSystemDiskPath := d.systemVolumePath(req.MachineID)
 	if err := os.MkdirAll(filepath.Dir(newSystemDiskPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create machine disk dir: %w", err)
 	}
-	if len(snap.DiskPaths) < 1 {
+	systemDiskPath, ok := restoredArtifacts["system.img"]
+	if !ok {
 		clearOperation = true
-		return nil, fmt.Errorf("snapshot %q has no disk paths", snapshotID)
+		return nil, fmt.Errorf("snapshot %q is missing system disk artifact", snapshotID)
 	}
-	if err := cowCopyFile(snap.DiskPaths[0], newSystemDiskPath); err != nil {
+	memoryArtifact, ok := restoredArtifacts["memory.bin"]
+	if !ok {
+		clearOperation = true
+		return nil, fmt.Errorf("snapshot %q is missing memory artifact", snapshotID)
+	}
+	vmstateArtifact, ok := restoredArtifacts["vmstate.bin"]
+	if !ok {
+		clearOperation = true
+		return nil, fmt.Errorf("snapshot %q is missing vmstate artifact", snapshotID)
+	}
+	if err := cowCopyFile(systemDiskPath.LocalPath, newSystemDiskPath); err != nil {
 		clearOperation = true
 		return nil, fmt.Errorf("copy system disk for restore: %w", err)
 	}
 
+	type restoredUserVolume struct {
+		ID      contracthost.VolumeID
+		Path    string
+		DriveID string
+	}
+	restoredUserVolumes := make([]restoredUserVolume, 0)
+	restoredDrivePaths := make(map[string]string)
+	for _, restored := range orderedRestoredUserDiskArtifacts(restoredArtifacts) {
+		name := restored.Artifact.Name
+		driveID := strings.TrimSuffix(name, filepath.Ext(name))
+		volumeID := contracthost.VolumeID(fmt.Sprintf("%s-%s", req.MachineID, driveID))
+		volumePath := filepath.Join(d.config.MachineDisksDir, string(req.MachineID), name)
+		if err := cowCopyFile(restored.LocalPath, volumePath); err != nil {
+			clearOperation = true
+			return nil, fmt.Errorf("copy restored drive %q: %w", driveID, err)
+		}
+		restoredUserVolumes = append(restoredUserVolumes, restoredUserVolume{
+			ID:      volumeID,
+			Path:    volumePath,
+			DriveID: driveID,
+		})
+		restoredDrivePaths[driveID] = volumePath
+	}
+
 	loadSpec := firecracker.SnapshotLoadSpec{
 		ID:              firecracker.MachineID(req.MachineID),
-		SnapshotPath:    snap.StateFilePath,
-		MemFilePath:     snap.MemFilePath,
+		SnapshotPath:    vmstateArtifact.LocalPath,
+		MemFilePath:     memoryArtifact.LocalPath,
 		RootFSPath:      newSystemDiskPath,
 		KernelImagePath: artifact.KernelImagePath,
-		DiskPaths:       map[string]string{},
+		DiskPaths:       restoredDrivePaths,
 		Network:         &restoreNetwork,
 	}
 
@@ -275,18 +370,44 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		ID:                systemVolumeID,
 		Kind:              contracthost.VolumeKindSystem,
 		AttachedMachineID: machineIDPtr(req.MachineID),
-		SourceArtifact:    &snap.Artifact,
+		SourceArtifact:    &req.Artifact,
 		Pool:              model.StoragePoolMachineDisks,
 		Path:              newSystemDiskPath,
 		CreatedAt:         now,
 	}); err != nil {
-		return nil, err
+		_ = d.runtime.Delete(ctx, *machineState)
+		_ = os.RemoveAll(filepath.Dir(newSystemDiskPath))
+		clearOperation = true
+		return nil, fmt.Errorf("create system volume record for restore: %w", err)
+	}
+	restoredUserVolumeIDs := make([]contracthost.VolumeID, 0, len(restoredUserVolumes))
+	for _, volume := range restoredUserVolumes {
+		if err := d.store.CreateVolume(ctx, model.VolumeRecord{
+			ID:                volume.ID,
+			Kind:              contracthost.VolumeKindUser,
+			AttachedMachineID: machineIDPtr(req.MachineID),
+			SourceArtifact:    &req.Artifact,
+			Pool:              model.StoragePoolMachineDisks,
+			Path:              volume.Path,
+			CreatedAt:         now,
+		}); err != nil {
+			for _, restoredVolumeID := range restoredUserVolumeIDs {
+				_ = d.store.DeleteVolume(context.Background(), restoredVolumeID)
+			}
+			_ = d.store.DeleteVolume(context.Background(), systemVolumeID)
+			_ = d.runtime.Delete(ctx, *machineState)
+			_ = os.RemoveAll(filepath.Dir(newSystemDiskPath))
+			clearOperation = true
+			return nil, fmt.Errorf("create restored user volume record %q: %w", volume.ID, err)
+		}
+		restoredUserVolumeIDs = append(restoredUserVolumeIDs, volume.ID)
 	}
 
 	machineRecord := model.MachineRecord{
 		ID:                req.MachineID,
-		Artifact:          snap.Artifact,
+		Artifact:          req.Artifact,
 		SystemVolumeID:    systemVolumeID,
+		UserVolumeIDs:     restoredUserVolumeIDs,
 		RuntimeHost:       machineState.RuntimeHost,
 		TapDevice:         machineState.TapName,
 		Ports:             defaultMachinePorts(),
@@ -306,7 +427,14 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 	d.relayAllocMu.Unlock()
 	if err != nil {
 		d.stopMachineRelays(machineRecord.ID)
-		return nil, err
+		for _, restoredVolumeID := range restoredUserVolumeIDs {
+			_ = d.store.DeleteVolume(context.Background(), restoredVolumeID)
+		}
+		_ = d.store.DeleteVolume(context.Background(), systemVolumeID)
+		_ = d.runtime.Delete(ctx, *machineState)
+		_ = os.RemoveAll(filepath.Dir(newSystemDiskPath))
+		clearOperation = true
+		return nil, fmt.Errorf("allocate relay ports for restored machine: %w", err)
 	}
 	machineRecord.Ports = buildMachinePorts(sshRelayPort, vncRelayPort)
 	startedRelays := true
@@ -316,6 +444,13 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		}
 	}()
 	if err := d.store.CreateMachine(ctx, machineRecord); err != nil {
+		for _, restoredVolumeID := range restoredUserVolumeIDs {
+			_ = d.store.DeleteVolume(context.Background(), restoredVolumeID)
+		}
+		_ = d.store.DeleteVolume(context.Background(), systemVolumeID)
+		_ = d.runtime.Delete(ctx, *machineState)
+		_ = os.RemoveAll(filepath.Dir(newSystemDiskPath))
+		clearOperation = true
 		return nil, err
 	}
 
@@ -360,10 +495,87 @@ func (d *Daemon) DeleteSnapshotByID(ctx context.Context, snapshotID contracthost
 
 func snapshotToContract(record model.SnapshotRecord) contracthost.Snapshot {
 	return contracthost.Snapshot{
-		ID:        record.ID,
-		MachineID: record.MachineID,
-		CreatedAt: record.CreatedAt,
+		ID:                record.ID,
+		MachineID:         record.MachineID,
+		SourceRuntimeHost: record.SourceRuntimeHost,
+		SourceTapDevice:   record.SourceTapDevice,
+		CreatedAt:         record.CreatedAt,
 	}
+}
+
+func snapshotArtifactsToContract(artifacts []model.SnapshotArtifactRecord) []contracthost.SnapshotArtifact {
+	converted := make([]contracthost.SnapshotArtifact, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		converted = append(converted, contracthost.SnapshotArtifact{
+			ID:        artifact.ID,
+			Kind:      artifact.Kind,
+			Name:      artifact.Name,
+			SizeBytes: artifact.SizeBytes,
+			SHA256Hex: artifact.SHA256Hex,
+		})
+	}
+	return converted
+}
+
+func orderedRestoredUserDiskArtifacts(artifacts map[string]restoredSnapshotArtifact) []restoredSnapshotArtifact {
+	ordered := make([]restoredSnapshotArtifact, 0, len(artifacts))
+	for name, artifact := range artifacts {
+		if !strings.HasPrefix(name, "user-") || filepath.Ext(name) != ".img" {
+			continue
+		}
+		ordered = append(ordered, artifact)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		iIdx, iOK := restoredUserDiskIndex(ordered[i].Artifact.Name)
+		jIdx, jOK := restoredUserDiskIndex(ordered[j].Artifact.Name)
+		switch {
+		case iOK && jOK && iIdx != jIdx:
+			return iIdx < jIdx
+		case iOK != jOK:
+			return iOK
+		default:
+			return ordered[i].Artifact.Name < ordered[j].Artifact.Name
+		}
+	})
+	return ordered
+}
+
+func restoredUserDiskIndex(name string) (int, bool) {
+	if !strings.HasPrefix(name, "user-") || filepath.Ext(name) != ".img" {
+		return 0, false
+	}
+	value := strings.TrimSuffix(strings.TrimPrefix(name, "user-"), filepath.Ext(name))
+	index, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false
+	}
+	return index, true
+}
+
+func (d *Daemon) resolveRestoreNetwork(ctx context.Context, snapshotID contracthost.SnapshotID, spec contracthost.DurableSnapshotSpec) (firecracker.NetworkAllocation, error) {
+	if network, err := restoreNetworkFromDurableSpec(spec); err == nil {
+		return network, nil
+	}
+
+	snapshot, err := d.store.GetSnapshot(ctx, snapshotID)
+	if err == nil {
+		return restoreNetworkFromSnapshot(snapshot)
+	}
+	if err != store.ErrNotFound {
+		return firecracker.NetworkAllocation{}, err
+	}
+	return firecracker.NetworkAllocation{}, fmt.Errorf("snapshot %q is missing restore network metadata", snapshotID)
+}
+
+func restoreNetworkFromDurableSpec(spec contracthost.DurableSnapshotSpec) (firecracker.NetworkAllocation, error) {
+	if strings.TrimSpace(spec.SourceRuntimeHost) == "" || strings.TrimSpace(spec.SourceTapDevice) == "" {
+		return firecracker.NetworkAllocation{}, fmt.Errorf("durable snapshot spec is missing restore network metadata")
+	}
+	network, err := firecracker.AllocationFromGuestIP(spec.SourceRuntimeHost, spec.SourceTapDevice)
+	if err != nil {
+		return firecracker.NetworkAllocation{}, fmt.Errorf("reconstruct durable snapshot %q network: %w", spec.SnapshotID, err)
+	}
+	return network, nil
 }
 
 func restoreNetworkFromSnapshot(snap *model.SnapshotRecord) (firecracker.NetworkAllocation, error) {

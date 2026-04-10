@@ -66,7 +66,7 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	if err := os.MkdirAll(filepath.Dir(systemVolumePath), 0o755); err != nil {
 		return nil, fmt.Errorf("create system volume dir for %q: %w", req.MachineID, err)
 	}
-	if err := cloneFile(artifact.RootFSPath, systemVolumePath); err != nil {
+	if err := cowCopyFile(artifact.RootFSPath, systemVolumePath); err != nil {
 		return nil, err
 	}
 	removeSystemVolumeOnFailure := true
@@ -77,14 +77,8 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 		_ = os.Remove(systemVolumePath)
 		_ = os.RemoveAll(filepath.Dir(systemVolumePath))
 	}()
-	if err := injectGuestConfig(ctx, systemVolumePath, guestConfig); err != nil {
-		return nil, err
-	}
-	if err := injectMachineIdentity(ctx, systemVolumePath, req.MachineID); err != nil {
-		return nil, err
-	}
 
-	spec, err := d.buildMachineSpec(req.MachineID, artifact, userVolumes, systemVolumePath)
+	spec, err := d.buildMachineSpec(req.MachineID, artifact, userVolumes, systemVolumePath, guestConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -95,17 +89,6 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 
 	state, err := d.runtime.Boot(ctx, spec, usedNetworks)
 	if err != nil {
-		return nil, err
-	}
-
-	ports := defaultMachinePorts()
-	if err := waitForGuestReady(ctx, state.RuntimeHost, ports); err != nil {
-		_ = d.runtime.Delete(context.Background(), *state)
-		return nil, err
-	}
-	guestSSHPublicKey, err := d.readGuestSSHPublicKey(ctx, state.RuntimeHost)
-	if err != nil {
-		_ = d.runtime.Delete(context.Background(), *state)
 		return nil, err
 	}
 
@@ -143,44 +126,20 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	}
 
 	record := model.MachineRecord{
-		ID:                req.MachineID,
-		Artifact:          req.Artifact,
-		SystemVolumeID:    systemVolumeRecord.ID,
-		UserVolumeIDs:     append([]contracthost.VolumeID(nil), attachedUserVolumeIDs...),
-		RuntimeHost:       state.RuntimeHost,
-		TapDevice:         state.TapName,
-		Ports:             ports,
-		GuestSSHPublicKey: guestSSHPublicKey,
-		Phase:             contracthost.MachinePhaseRunning,
-		PID:               state.PID,
-		SocketPath:        state.SocketPath,
-		CreatedAt:         now,
-		StartedAt:         state.StartedAt,
+		ID:             req.MachineID,
+		Artifact:       req.Artifact,
+		GuestConfig:    cloneGuestConfig(guestConfig),
+		SystemVolumeID: systemVolumeRecord.ID,
+		UserVolumeIDs:  append([]contracthost.VolumeID(nil), attachedUserVolumeIDs...),
+		RuntimeHost:    state.RuntimeHost,
+		TapDevice:      state.TapName,
+		Ports:          defaultMachinePorts(),
+		Phase:          contracthost.MachinePhaseStarting,
+		PID:            state.PID,
+		SocketPath:     state.SocketPath,
+		CreatedAt:      now,
+		StartedAt:      state.StartedAt,
 	}
-	d.relayAllocMu.Lock()
-	sshRelayPort, err := d.allocateMachineRelayProxy(ctx, record, contracthost.MachinePortNameSSH, record.RuntimeHost, defaultSSHPort, minMachineSSHRelayPort, maxMachineSSHRelayPort)
-	var vncRelayPort uint16
-	if err == nil {
-		vncRelayPort, err = d.allocateMachineRelayProxy(ctx, record, contracthost.MachinePortNameVNC, record.RuntimeHost, defaultVNCPort, minMachineVNCRelayPort, maxMachineVNCRelayPort)
-	}
-	d.relayAllocMu.Unlock()
-	if err != nil {
-		d.stopMachineRelays(record.ID)
-		for _, volume := range userVolumes {
-			volume.AttachedMachineID = nil
-			_ = d.store.UpdateVolume(context.Background(), volume)
-		}
-		_ = d.store.DeleteVolume(context.Background(), systemVolumeRecord.ID)
-		_ = d.runtime.Delete(context.Background(), *state)
-		return nil, err
-	}
-	record.Ports = buildMachinePorts(sshRelayPort, vncRelayPort)
-	startedRelays := true
-	defer func() {
-		if startedRelays {
-			d.stopMachineRelays(record.ID)
-		}
-	}()
 	if err := d.store.CreateMachine(ctx, record); err != nil {
 		for _, volume := range userVolumes {
 			volume.AttachedMachineID = nil
@@ -192,12 +151,11 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	}
 
 	removeSystemVolumeOnFailure = false
-	startedRelays = false
 	clearOperation = true
 	return &contracthost.CreateMachineResponse{Machine: machineToContract(record)}, nil
 }
 
-func (d *Daemon) buildMachineSpec(machineID contracthost.MachineID, artifact *model.ArtifactRecord, userVolumes []model.VolumeRecord, systemVolumePath string) (firecracker.MachineSpec, error) {
+func (d *Daemon) buildMachineSpec(machineID contracthost.MachineID, artifact *model.ArtifactRecord, userVolumes []model.VolumeRecord, systemVolumePath string, guestConfig *contracthost.GuestConfig) (firecracker.MachineSpec, error) {
 	drives := make([]firecracker.DriveSpec, 0, len(userVolumes))
 	for i, volume := range userVolumes {
 		drives = append(drives, firecracker.DriveSpec{
@@ -207,14 +165,25 @@ func (d *Daemon) buildMachineSpec(machineID contracthost.MachineID, artifact *mo
 		})
 	}
 
+	mmds, err := d.guestMetadataSpec(machineID, guestConfig)
+	if err != nil {
+		return firecracker.MachineSpec{}, err
+	}
 	spec := firecracker.MachineSpec{
 		ID:              firecracker.MachineID(machineID),
 		VCPUs:           defaultGuestVCPUs,
 		MemoryMiB:       defaultGuestMemoryMiB,
 		KernelImagePath: artifact.KernelImagePath,
 		RootFSPath:      systemVolumePath,
-		KernelArgs:      defaultGuestKernelArgs,
-		Drives:          drives,
+		RootDrive: firecracker.DriveSpec{
+			ID:        "root_drive",
+			Path:      systemVolumePath,
+			CacheType: firecracker.DriveCacheTypeUnsafe,
+			IOEngine:  firecracker.DriveIOEngineSync,
+		},
+		KernelArgs: defaultGuestKernelArgs,
+		Drives:     drives,
+		MMDS:       mmds,
 	}
 	if err := spec.Validate(); err != nil {
 		return firecracker.MachineSpec{}, err

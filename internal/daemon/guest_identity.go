@@ -54,6 +54,31 @@ hostname "$machine_name" >/dev/null 2>&1 || true
 	return nil
 }
 
+func (d *Daemon) syncGuestFilesystemOverSSH(ctx context.Context, runtimeHost string) error {
+	runtimeHost = strings.TrimSpace(runtimeHost)
+	if runtimeHost == "" {
+		return fmt.Errorf("guest runtime host is required")
+	}
+
+	cmd := exec.CommandContext(
+		ctx,
+		"ssh",
+		"-i", d.backendSSHPrivateKeyPath(),
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "IdentitiesOnly=yes",
+		"-o", "BatchMode=yes",
+		"-p", strconv.Itoa(int(defaultSSHPort)),
+		"node@"+runtimeHost,
+		"sudo bash -lc "+shellSingleQuote("sync"),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sync guest filesystem over ssh: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
 func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }

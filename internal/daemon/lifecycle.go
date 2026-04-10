@@ -48,7 +48,11 @@ func (d *Daemon) StartMachine(ctx context.Context, id contracthost.MachineID) (*
 	if err != nil {
 		return nil, err
 	}
+	previousRecord := *record
 	if record.Phase == contracthost.MachinePhaseRunning {
+		return &contracthost.GetMachineResponse{Machine: machineToContract(*record)}, nil
+	}
+	if record.Phase == contracthost.MachinePhaseStarting {
 		return &contracthost.GetMachineResponse{Machine: machineToContract(*record)}, nil
 	}
 	if record.Phase != contracthost.MachinePhaseStopped {
@@ -82,7 +86,7 @@ func (d *Daemon) StartMachine(ctx context.Context, id contracthost.MachineID) (*
 	if err != nil {
 		return nil, err
 	}
-	spec, err := d.buildMachineSpec(id, artifact, userVolumes, systemVolume.Path)
+	spec, err := d.buildMachineSpec(id, artifact, userVolumes, systemVolume.Path, record.GuestConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -94,39 +98,18 @@ func (d *Daemon) StartMachine(ctx context.Context, id contracthost.MachineID) (*
 	if err != nil {
 		return nil, err
 	}
-	ports := defaultMachinePorts()
-	if err := waitForGuestReady(ctx, state.RuntimeHost, ports); err != nil {
-		_ = d.runtime.Delete(context.Background(), *state)
-		return nil, err
-	}
-	guestSSHPublicKey, err := d.readGuestSSHPublicKey(ctx, state.RuntimeHost)
-	if err != nil {
-		_ = d.runtime.Delete(context.Background(), *state)
-		return nil, err
-	}
-
 	record.RuntimeHost = state.RuntimeHost
 	record.TapDevice = state.TapName
-	record.Ports = ports
-	record.GuestSSHPublicKey = guestSSHPublicKey
-	record.Phase = contracthost.MachinePhaseRunning
+	record.Ports = defaultMachinePorts()
+	record.GuestSSHPublicKey = ""
+	record.Phase = contracthost.MachinePhaseStarting
 	record.Error = ""
 	record.PID = state.PID
 	record.SocketPath = state.SocketPath
 	record.StartedAt = state.StartedAt
 	if err := d.store.UpdateMachine(ctx, *record); err != nil {
 		_ = d.runtime.Delete(context.Background(), *state)
-		return nil, err
-	}
-	if err := d.ensureMachineRelays(ctx, record); err != nil {
-		d.stopMachineRelays(id)
-		_ = d.runtime.Delete(context.Background(), *state)
-		return nil, err
-	}
-	if err := d.ensurePublishedPortsForMachine(ctx, *record); err != nil {
-		d.stopMachineRelays(id)
-		d.stopPublishedPortsForMachine(id)
-		_ = d.runtime.Delete(context.Background(), *state)
+		_ = d.store.UpdateMachine(context.Background(), previousRecord)
 		return nil, err
 	}
 
@@ -272,7 +255,10 @@ func (d *Daemon) listRunningNetworks(ctx context.Context, ignore contracthost.Ma
 
 	networks := make([]firecracker.NetworkAllocation, 0, len(records))
 	for _, record := range records {
-		if record.ID == ignore || record.Phase != contracthost.MachinePhaseRunning {
+		if record.ID == ignore {
+			continue
+		}
+		if record.Phase != contracthost.MachinePhaseRunning && record.Phase != contracthost.MachinePhaseStarting {
 			continue
 		}
 		if strings.TrimSpace(record.RuntimeHost) == "" || strings.TrimSpace(record.TapDevice) == "" {
@@ -337,11 +323,8 @@ func (d *Daemon) reconcileStart(ctx context.Context, machineID contracthost.Mach
 	if err != nil {
 		return err
 	}
-	if record.Phase == contracthost.MachinePhaseRunning {
-		if err := d.ensureMachineRelays(ctx, record); err != nil {
-			return err
-		}
-		if err := d.ensurePublishedPortsForMachine(ctx, *record); err != nil {
+	if record.Phase == contracthost.MachinePhaseRunning || record.Phase == contracthost.MachinePhaseStarting {
+		if _, err := d.reconcileMachine(ctx, machineID); err != nil {
 			return err
 		}
 		return d.store.DeleteOperation(ctx, machineID)
@@ -385,13 +368,49 @@ func (d *Daemon) reconcileMachine(ctx context.Context, machineID contracthost.Ma
 	if err != nil {
 		return nil, err
 	}
-	if record.Phase != contracthost.MachinePhaseRunning {
+	if record.Phase != contracthost.MachinePhaseRunning && record.Phase != contracthost.MachinePhaseStarting {
 		return record, nil
 	}
 
 	state, err := d.runtime.Inspect(machineToRuntimeState(*record))
 	if err != nil {
 		return nil, err
+	}
+	if record.Phase == contracthost.MachinePhaseStarting {
+		if state.Phase != firecracker.PhaseRunning {
+			return d.failMachineStartup(ctx, record, state.Error)
+		}
+		ready, err := guestPortsReady(ctx, state.RuntimeHost, defaultMachinePorts())
+		if err != nil {
+			return nil, err
+		}
+		if !ready {
+			return record, nil
+		}
+		guestSSHPublicKey, err := d.readGuestSSHPublicKey(ctx, state.RuntimeHost)
+		if err != nil {
+			return d.failMachineStartup(ctx, record, err.Error())
+		}
+		record.RuntimeHost = state.RuntimeHost
+		record.TapDevice = state.TapName
+		record.Ports = defaultMachinePorts()
+		record.GuestSSHPublicKey = guestSSHPublicKey
+		record.Phase = contracthost.MachinePhaseRunning
+		record.Error = ""
+		record.PID = state.PID
+		record.SocketPath = state.SocketPath
+		record.StartedAt = state.StartedAt
+		if err := d.store.UpdateMachine(ctx, *record); err != nil {
+			return nil, err
+		}
+		if err := d.ensureMachineRelays(ctx, record); err != nil {
+			return d.failMachineStartup(ctx, record, err.Error())
+		}
+		if err := d.ensurePublishedPortsForMachine(ctx, *record); err != nil {
+			d.stopMachineRelays(record.ID)
+			return d.failMachineStartup(ctx, record, err.Error())
+		}
+		return record, nil
 	}
 	if state.Phase == firecracker.PhaseRunning {
 		if err := d.ensureMachineRelays(ctx, record); err != nil {
@@ -407,6 +426,28 @@ func (d *Daemon) reconcileMachine(ctx context.Context, machineID contracthost.Ma
 	d.stopPublishedPortsForMachine(record.ID)
 	record.Phase = contracthost.MachinePhaseFailed
 	record.Error = state.Error
+	record.PID = 0
+	record.SocketPath = ""
+	record.RuntimeHost = ""
+	record.TapDevice = ""
+	record.StartedAt = nil
+	if err := d.store.UpdateMachine(ctx, *record); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+func (d *Daemon) failMachineStartup(ctx context.Context, record *model.MachineRecord, failureReason string) (*model.MachineRecord, error) {
+	if record == nil {
+		return nil, fmt.Errorf("machine record is required")
+	}
+	_ = d.runtime.Delete(ctx, machineToRuntimeState(*record))
+	d.stopMachineRelays(record.ID)
+	d.stopPublishedPortsForMachine(record.ID)
+	record.Phase = contracthost.MachinePhaseFailed
+	record.Error = strings.TrimSpace(failureReason)
+	record.Ports = defaultMachinePorts()
+	record.GuestSSHPublicKey = ""
 	record.PID = 0
 	record.SocketPath = ""
 	record.RuntimeHost = ""
@@ -450,6 +491,11 @@ func (d *Daemon) deleteMachineRecord(ctx context.Context, record *model.MachineR
 }
 
 func (d *Daemon) stopMachineRecord(ctx context.Context, record *model.MachineRecord) error {
+	if record.Phase == contracthost.MachinePhaseRunning && strings.TrimSpace(record.RuntimeHost) != "" {
+		if err := d.syncGuestFilesystem(ctx, record.RuntimeHost); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: sync guest filesystem for %q failed before stop: %v\n", record.ID, err)
+		}
+	}
 	d.stopMachineRelays(record.ID)
 	d.stopPublishedPortsForMachine(record.ID)
 	if err := d.runtime.Delete(ctx, machineToRuntimeState(*record)); err != nil {

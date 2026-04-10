@@ -414,6 +414,8 @@ func publishedPortToContract(record model.PublishedPortRecord) contracthost.Publ
 func machineToRuntimeState(record model.MachineRecord) firecracker.MachineState {
 	phase := firecracker.PhaseStopped
 	switch record.Phase {
+	case contracthost.MachinePhaseStarting:
+		phase = firecracker.PhaseRunning
 	case contracthost.MachinePhaseRunning:
 		phase = firecracker.PhaseRunning
 	case contracthost.MachinePhaseFailed:

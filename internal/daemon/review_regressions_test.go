@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -52,6 +55,19 @@ type machineLookupErrorStore struct {
 
 func (s machineLookupErrorStore) GetMachine(context.Context, contracthost.MachineID) (*model.MachineRecord, error) {
 	return nil, s.err
+}
+
+type relayExhaustionStore struct {
+	hoststore.Store
+	extraMachines []model.MachineRecord
+}
+
+func (s relayExhaustionStore) ListMachines(ctx context.Context) ([]model.MachineRecord, error) {
+	machines, err := s.Store.ListMachines(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return append(machines, s.extraMachines...), nil
 }
 
 type publishedPortResult struct {
@@ -283,6 +299,249 @@ func TestReconcileRestorePreservesArtifactsOnUnexpectedStoreError(t *testing.T) 
 	assertOperationCount(t, baseStore, 1)
 }
 
+func TestStartMachineTransitionsToStartingWithoutRelayAllocation(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	baseStore, err := hoststore.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	exhaustedStore := relayExhaustionStore{
+		Store:         baseStore,
+		extraMachines: exhaustedMachineRelayRecords(),
+	}
+
+	sshListener := listenTestPort(t, int(defaultSSHPort))
+	defer func() {
+		_ = sshListener.Close()
+	}()
+	vncListener := listenTestPort(t, int(defaultVNCPort))
+	defer func() {
+		_ = vncListener.Close()
+	}()
+
+	startedAt := time.Unix(1700000200, 0).UTC()
+	runtime := &fakeRuntime{
+		bootState: firecracker.MachineState{
+			ID:          "vm-start",
+			Phase:       firecracker.PhaseRunning,
+			PID:         9999,
+			RuntimeHost: "127.0.0.1",
+			SocketPath:  filepath.Join(cfg.RuntimeDir, "machines", "vm-start", "root", "run", "firecracker.sock"),
+			TapName:     "fctap-start",
+			StartedAt:   &startedAt,
+		},
+	}
+
+	hostDaemon, err := New(cfg, exhaustedStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
+
+	artifactRef := contracthost.ArtifactRef{KernelImageURL: "kernel", RootFSURL: "rootfs"}
+	kernelPath := filepath.Join(root, "artifact-kernel")
+	rootFSPath := filepath.Join(root, "artifact-rootfs")
+	systemVolumePath := filepath.Join(root, "machine-disks", "vm-start", "rootfs.ext4")
+	for _, file := range []string{kernelPath, rootFSPath, systemVolumePath} {
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			t.Fatalf("mkdir for %q: %v", file, err)
+		}
+		if err := os.WriteFile(file, []byte("payload"), 0o644); err != nil {
+			t.Fatalf("write file %q: %v", file, err)
+		}
+	}
+	if err := baseStore.PutArtifact(context.Background(), model.ArtifactRecord{
+		Ref:             artifactRef,
+		LocalKey:        "artifact",
+		LocalDir:        filepath.Join(root, "artifact"),
+		KernelImagePath: kernelPath,
+		RootFSPath:      rootFSPath,
+		CreatedAt:       time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+	if err := baseStore.CreateVolume(context.Background(), model.VolumeRecord{
+		ID:        "vm-start-system",
+		Kind:      contracthost.VolumeKindSystem,
+		Pool:      model.StoragePoolMachineDisks,
+		Path:      systemVolumePath,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create system volume: %v", err)
+	}
+	if err := baseStore.CreateMachine(context.Background(), model.MachineRecord{
+		ID:             "vm-start",
+		Artifact:       artifactRef,
+		SystemVolumeID: "vm-start-system",
+		Ports:          defaultMachinePorts(),
+		Phase:          contracthost.MachinePhaseStopped,
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create machine: %v", err)
+	}
+
+	response, err := hostDaemon.StartMachine(context.Background(), "vm-start")
+	if err != nil {
+		t.Fatalf("StartMachine error = %v", err)
+	}
+	if response.Machine.Phase != contracthost.MachinePhaseStarting {
+		t.Fatalf("response machine phase = %q, want %q", response.Machine.Phase, contracthost.MachinePhaseStarting)
+	}
+
+	machine, err := baseStore.GetMachine(context.Background(), "vm-start")
+	if err != nil {
+		t.Fatalf("get machine: %v", err)
+	}
+	if machine.Phase != contracthost.MachinePhaseStarting {
+		t.Fatalf("machine phase = %q, want %q", machine.Phase, contracthost.MachinePhaseStarting)
+	}
+	if machine.RuntimeHost != "127.0.0.1" || machine.TapDevice != "fctap-start" {
+		t.Fatalf("machine runtime state mismatch, got runtime_host=%q tap=%q", machine.RuntimeHost, machine.TapDevice)
+	}
+	if machine.PID != 9999 || machine.SocketPath == "" || machine.StartedAt == nil {
+		t.Fatalf("machine process state missing: pid=%d socket=%q started_at=%v", machine.PID, machine.SocketPath, machine.StartedAt)
+	}
+	if len(runtime.deleteCalls) != 0 {
+		t.Fatalf("runtime delete calls = %d, want 0", len(runtime.deleteCalls))
+	}
+}
+
+func TestRestoreSnapshotDeletesSystemVolumeRecordWhenRelayAllocationFails(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	baseStore, err := hoststore.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	exhaustedStore := relayExhaustionStore{
+		Store:         baseStore,
+		extraMachines: exhaustedMachineRelayRecords(),
+	}
+
+	sshListener := listenTestPort(t, int(defaultSSHPort))
+	defer func() {
+		_ = sshListener.Close()
+	}()
+	vncListener := listenTestPort(t, int(defaultVNCPort))
+	defer func() {
+		_ = vncListener.Close()
+	}()
+
+	startedAt := time.Unix(1700000300, 0).UTC()
+	runtime := &fakeRuntime{
+		bootState: firecracker.MachineState{
+			ID:          "restored-exhausted",
+			Phase:       firecracker.PhaseRunning,
+			PID:         8888,
+			RuntimeHost: "127.0.0.1",
+			SocketPath:  filepath.Join(cfg.RuntimeDir, "machines", "restored-exhausted", "root", "run", "firecracker.sock"),
+			TapName:     "fctap-restore",
+			StartedAt:   &startedAt,
+		},
+	}
+
+	hostDaemon, err := New(cfg, exhaustedStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
+	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID) error { return nil }
+
+	artifactRef := contracthost.ArtifactRef{KernelImageURL: "kernel", RootFSURL: "rootfs"}
+	kernelPath := filepath.Join(root, "artifact-kernel")
+	rootFSPath := filepath.Join(root, "artifact-rootfs")
+	if err := os.WriteFile(kernelPath, []byte("kernel"), 0o644); err != nil {
+		t.Fatalf("write kernel: %v", err)
+	}
+	if err := os.WriteFile(rootFSPath, []byte("rootfs"), 0o644); err != nil {
+		t.Fatalf("write rootfs: %v", err)
+	}
+	if err := baseStore.PutArtifact(context.Background(), model.ArtifactRecord{
+		Ref:             artifactRef,
+		LocalKey:        "artifact",
+		LocalDir:        filepath.Join(root, "artifact"),
+		KernelImagePath: kernelPath,
+		RootFSPath:      rootFSPath,
+		CreatedAt:       time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+
+	snapDir := filepath.Join(root, "snapshots", "snap-exhausted")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatalf("create snapshot dir: %v", err)
+	}
+	snapDisk := filepath.Join(snapDir, "system.img")
+	if err := os.WriteFile(snapDisk, []byte("disk"), 0o644); err != nil {
+		t.Fatalf("write snapshot disk: %v", err)
+	}
+	memPath := filepath.Join(snapDir, "memory.bin")
+	if err := os.WriteFile(memPath, []byte("mem"), 0o644); err != nil {
+		t.Fatalf("write memory snapshot: %v", err)
+	}
+	statePath := filepath.Join(snapDir, "vmstate.bin")
+	if err := os.WriteFile(statePath, []byte("state"), 0o644); err != nil {
+		t.Fatalf("write vmstate snapshot: %v", err)
+	}
+	if err := baseStore.CreateSnapshot(context.Background(), model.SnapshotRecord{
+		ID:                "snap-exhausted",
+		MachineID:         "source",
+		Artifact:          artifactRef,
+		MemFilePath:       memPath,
+		StateFilePath:     statePath,
+		DiskPaths:         []string{snapDisk},
+		SourceRuntimeHost: "172.16.0.2",
+		SourceTapDevice:   "fctap0",
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+
+	server := newRestoreArtifactServer(t, map[string][]byte{
+		"/kernel":  []byte("kernel"),
+		"/rootfs":  []byte("rootfs"),
+		"/memory":  []byte("mem"),
+		"/vmstate": []byte("state"),
+		"/system":  []byte("disk"),
+	})
+	defer server.Close()
+
+	_, err = hostDaemon.RestoreSnapshot(context.Background(), "snap-exhausted", contracthost.RestoreSnapshotRequest{
+		MachineID: "restored-exhausted",
+		Artifact: contracthost.ArtifactRef{
+			KernelImageURL: server.URL + "/kernel",
+			RootFSURL:      server.URL + "/rootfs",
+		},
+		Snapshot: contracthost.DurableSnapshotSpec{
+			SnapshotID: "snap-exhausted",
+			MachineID:  "source",
+			ImageID:    "image-1",
+			Artifacts: []contracthost.SnapshotArtifact{
+				{ID: "memory", Kind: contracthost.SnapshotArtifactKindMemory, Name: "memory.bin", DownloadURL: server.URL + "/memory"},
+				{ID: "vmstate", Kind: contracthost.SnapshotArtifactKindVMState, Name: "vmstate.bin", DownloadURL: server.URL + "/vmstate"},
+				{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", DownloadURL: server.URL + "/system"},
+			},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "allocate relay ports for restored machine") {
+		t.Fatalf("RestoreSnapshot error = %v, want relay allocation failure", err)
+	}
+
+	if _, err := baseStore.GetVolume(context.Background(), "restored-exhausted-system"); !errors.Is(err, hoststore.ErrNotFound) {
+		t.Fatalf("restored system volume record should be deleted, get err = %v", err)
+	}
+	if _, err := os.Stat(hostDaemon.systemVolumePath("restored-exhausted")); !os.IsNotExist(err) {
+		t.Fatalf("restored system disk should be removed, stat err = %v", err)
+	}
+	if len(runtime.deleteCalls) != 1 {
+		t.Fatalf("runtime delete calls = %d, want 1", len(runtime.deleteCalls))
+	}
+	assertOperationCount(t, baseStore, 0)
+}
+
 func TestCreateSnapshotRejectsDuplicateSnapshotIDWithoutTouchingExistingArtifacts(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
@@ -337,6 +596,193 @@ func TestCreateSnapshotRejectsDuplicateSnapshotIDWithoutTouchingExistingArtifact
 		t.Fatalf("marker file should be preserved, stat error: %v", statErr)
 	}
 	assertOperationCount(t, fileStore, 0)
+}
+
+func TestStopMachineContinuesWhenGuestSyncFails(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := hoststore.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	runtime := &fakeRuntime{}
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
+	hostDaemon.syncGuestFilesystem = func(context.Context, string) error {
+		return errors.New("guest sync failed")
+	}
+
+	now := time.Now().UTC()
+	if err := fileStore.CreateMachine(context.Background(), model.MachineRecord{
+		ID:             "vm-stop-fail",
+		SystemVolumeID: "vm-stop-fail-system",
+		RuntimeHost:    "172.16.0.2",
+		TapDevice:      "fctap-stop-fail",
+		Phase:          contracthost.MachinePhaseRunning,
+		PID:            1234,
+		SocketPath:     filepath.Join(root, "runtime", "vm-stop-fail.sock"),
+		Ports:          defaultMachinePorts(),
+		CreatedAt:      now,
+		StartedAt:      &now,
+	}); err != nil {
+		t.Fatalf("create machine: %v", err)
+	}
+
+	if err := hostDaemon.StopMachine(context.Background(), "vm-stop-fail"); err != nil {
+		t.Fatalf("StopMachine returned error despite sync failure: %v", err)
+	}
+	if len(runtime.deleteCalls) != 1 {
+		t.Fatalf("runtime delete calls = %d, want 1", len(runtime.deleteCalls))
+	}
+
+	machine, err := fileStore.GetMachine(context.Background(), "vm-stop-fail")
+	if err != nil {
+		t.Fatalf("get machine: %v", err)
+	}
+	if machine.Phase != contracthost.MachinePhaseStopped {
+		t.Fatalf("machine phase = %q, want %q", machine.Phase, contracthost.MachinePhaseStopped)
+	}
+}
+
+func TestOrderedRestoredUserDiskArtifactsSortsByDriveIndex(t *testing.T) {
+	ordered := orderedRestoredUserDiskArtifacts(map[string]restoredSnapshotArtifact{
+		"user-10.img": {Artifact: contracthost.SnapshotArtifact{Name: "user-10.img"}},
+		"user-2.img":  {Artifact: contracthost.SnapshotArtifact{Name: "user-2.img"}},
+		"user-1.img":  {Artifact: contracthost.SnapshotArtifact{Name: "user-1.img"}},
+		"system.img":  {Artifact: contracthost.SnapshotArtifact{Name: "system.img"}},
+	})
+
+	names := make([]string, 0, len(ordered))
+	for _, artifact := range ordered {
+		names = append(names, artifact.Artifact.Name)
+	}
+	if got, want := strings.Join(names, ","), "user-1.img,user-2.img,user-10.img"; got != want {
+		t.Fatalf("ordered restored artifacts = %q, want %q", got, want)
+	}
+}
+
+func TestRestoreSnapshotCleansStagingArtifactsAfterSuccess(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := hoststore.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	sshListener := listenTestPort(t, int(defaultSSHPort))
+	defer func() { _ = sshListener.Close() }()
+	vncListener := listenTestPort(t, int(defaultVNCPort))
+	defer func() { _ = vncListener.Close() }()
+
+	startedAt := time.Unix(1700000400, 0).UTC()
+	runtime := &fakeRuntime{
+		bootState: firecracker.MachineState{
+			ID:          "restored-clean",
+			Phase:       firecracker.PhaseRunning,
+			PID:         7777,
+			RuntimeHost: "127.0.0.1",
+			SocketPath:  filepath.Join(cfg.RuntimeDir, "machines", "restored-clean", "root", "run", "firecracker.sock"),
+			TapName:     "fctap-clean",
+			StartedAt:   &startedAt,
+		},
+	}
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
+	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID) error { return nil }
+
+	server := newRestoreArtifactServer(t, map[string][]byte{
+		"/kernel":  []byte("kernel"),
+		"/rootfs":  []byte("rootfs"),
+		"/memory":  []byte("mem"),
+		"/vmstate": []byte("state"),
+		"/system":  []byte("disk"),
+	})
+	defer server.Close()
+
+	_, err = hostDaemon.RestoreSnapshot(context.Background(), "snap-clean", contracthost.RestoreSnapshotRequest{
+		MachineID: "restored-clean",
+		Artifact: contracthost.ArtifactRef{
+			KernelImageURL: server.URL + "/kernel",
+			RootFSURL:      server.URL + "/rootfs",
+		},
+		Snapshot: contracthost.DurableSnapshotSpec{
+			SnapshotID:        "snap-clean",
+			MachineID:         "source",
+			ImageID:           "image-1",
+			SourceRuntimeHost: "172.16.0.2",
+			SourceTapDevice:   "fctap0",
+			Artifacts: []contracthost.SnapshotArtifact{
+				{ID: "memory", Kind: contracthost.SnapshotArtifactKindMemory, Name: "memory.bin", DownloadURL: server.URL + "/memory", SHA256Hex: mustSHA256Hex(t, []byte("mem"))},
+				{ID: "vmstate", Kind: contracthost.SnapshotArtifactKindVMState, Name: "vmstate.bin", DownloadURL: server.URL + "/vmstate", SHA256Hex: mustSHA256Hex(t, []byte("state"))},
+				{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", DownloadURL: server.URL + "/system", SHA256Hex: mustSHA256Hex(t, []byte("disk"))},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RestoreSnapshot returned error: %v", err)
+	}
+
+	stagingDir := filepath.Join(cfg.SnapshotsDir, "snap-clean", "restores", "restored-clean")
+	if _, statErr := os.Stat(stagingDir); !os.IsNotExist(statErr) {
+		t.Fatalf("restore staging dir should be cleaned up, stat err = %v", statErr)
+	}
+}
+
+func TestRestoreSnapshotCleansStagingArtifactsAfterDownloadFailure(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := hoststore.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	runtime := &fakeRuntime{}
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
+
+	server := newRestoreArtifactServer(t, map[string][]byte{
+		"/kernel": []byte("kernel"),
+		"/rootfs": []byte("rootfs"),
+		"/memory": []byte("mem"),
+	})
+	defer server.Close()
+
+	_, err = hostDaemon.RestoreSnapshot(context.Background(), "snap-fail-clean", contracthost.RestoreSnapshotRequest{
+		MachineID: "restored-fail-clean",
+		Artifact: contracthost.ArtifactRef{
+			KernelImageURL: server.URL + "/kernel",
+			RootFSURL:      server.URL + "/rootfs",
+		},
+		Snapshot: contracthost.DurableSnapshotSpec{
+			SnapshotID:        "snap-fail-clean",
+			MachineID:         "source",
+			ImageID:           "image-1",
+			SourceRuntimeHost: "172.16.0.2",
+			SourceTapDevice:   "fctap0",
+			Artifacts: []contracthost.SnapshotArtifact{
+				{ID: "memory", Kind: contracthost.SnapshotArtifactKindMemory, Name: "memory.bin", DownloadURL: server.URL + "/memory", SHA256Hex: mustSHA256Hex(t, []byte("mem"))},
+				{ID: "vmstate", Kind: contracthost.SnapshotArtifactKindVMState, Name: "vmstate.bin", DownloadURL: server.URL + "/missing"},
+			},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "download durable snapshot artifacts") {
+		t.Fatalf("RestoreSnapshot error = %v, want durable artifact download failure", err)
+	}
+
+	stagingDir := filepath.Join(cfg.SnapshotsDir, "snap-fail-clean", "restores", "restored-fail-clean")
+	if _, statErr := os.Stat(stagingDir); !os.IsNotExist(statErr) {
+		t.Fatalf("restore staging dir should be cleaned up after download failure, stat err = %v", statErr)
+	}
 }
 
 func TestReconcileUsesReconciledMachineStateForPublishedPorts(t *testing.T) {
@@ -421,6 +867,26 @@ func waitPublishedPortResult(t *testing.T, ch <-chan publishedPortResult) publis
 		t.Fatal("timed out waiting for CreatePublishedPort result")
 		return publishedPortResult{}
 	}
+}
+
+func exhaustedMachineRelayRecords() []model.MachineRecord {
+	count := int(maxMachineSSHRelayPort-minMachineSSHRelayPort) + 1
+	machines := make([]model.MachineRecord, 0, count)
+	for i := 0; i < count; i++ {
+		machines = append(machines, model.MachineRecord{
+			ID:    contracthost.MachineID(fmt.Sprintf("relay-exhausted-%d", i)),
+			Ports: buildMachinePorts(minMachineSSHRelayPort+uint16(i), minMachineVNCRelayPort+uint16(i)),
+			Phase: contracthost.MachinePhaseRunning,
+		})
+	}
+	return machines
+}
+
+func mustSHA256Hex(t *testing.T, payload []byte) string {
+	t.Helper()
+
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 func assertOperationCount(t *testing.T, store hoststore.Store, want int) {

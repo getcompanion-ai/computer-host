@@ -29,6 +29,7 @@ type ArtifactRecord struct {
 type MachineRecord struct {
 	ID                contracthost.MachineID
 	Artifact          contracthost.ArtifactRef
+	GuestConfig       *contracthost.GuestConfig
 	SystemVolumeID    contracthost.VolumeID
 	UserVolumeIDs     []contracthost.VolumeID
 	RuntimeHost       string
@@ -71,9 +72,19 @@ type SnapshotRecord struct {
 	MemFilePath       string
 	StateFilePath     string
 	DiskPaths         []string
+	Artifacts         []SnapshotArtifactRecord
 	SourceRuntimeHost string
 	SourceTapDevice   string
 	CreatedAt         time.Time
+}
+
+type SnapshotArtifactRecord struct {
+	ID        string
+	Kind      contracthost.SnapshotArtifactKind
+	Name      string
+	LocalPath string
+	SizeBytes int64
+	SHA256Hex string
 }
 
 type PublishedPortRecord struct {

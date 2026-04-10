@@ -20,6 +20,7 @@ type Service interface {
 	Health(context.Context) (*contracthost.HealthResponse, error)
 	GetStorageReport(context.Context) (*contracthost.GetStorageReportResponse, error)
 	CreateSnapshot(context.Context, contracthost.MachineID, contracthost.CreateSnapshotRequest) (*contracthost.CreateSnapshotResponse, error)
+	UploadSnapshot(context.Context, contracthost.SnapshotID, contracthost.UploadSnapshotRequest) (*contracthost.UploadSnapshotResponse, error)
 	ListSnapshots(context.Context, contracthost.MachineID) (*contracthost.ListSnapshotsResponse, error)
 	GetSnapshot(context.Context, contracthost.SnapshotID) (*contracthost.GetSnapshotResponse, error)
 	DeleteSnapshotByID(context.Context, contracthost.SnapshotID) error
@@ -275,6 +276,25 @@ func (h *Handler) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusCreated, response)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "upload" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		var req contracthost.UploadSnapshotRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		response, err := h.service.UploadSnapshot(r.Context(), snapshotID, req)
+		if err != nil {
+			writeError(w, statusForError(err), err)
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
 		return
 	}
 

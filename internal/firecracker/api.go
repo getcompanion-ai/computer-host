@@ -27,10 +27,12 @@ type bootSourceRequest struct {
 }
 
 type driveRequest struct {
-	DriveID      string `json:"drive_id"`
-	IsReadOnly   bool   `json:"is_read_only"`
-	IsRootDevice bool   `json:"is_root_device"`
-	PathOnHost   string `json:"path_on_host"`
+	DriveID      string         `json:"drive_id"`
+	IsReadOnly   bool           `json:"is_read_only"`
+	IsRootDevice bool           `json:"is_root_device"`
+	PathOnHost   string         `json:"path_on_host"`
+	CacheType    DriveCacheType `json:"cache_type,omitempty"`
+	IOEngine     DriveIOEngine  `json:"io_engine,omitempty"`
 }
 
 type entropyRequest struct{}
@@ -56,6 +58,13 @@ type networkInterfaceRequest struct {
 	GuestMAC    string `json:"guest_mac,omitempty"`
 	HostDevName string `json:"host_dev_name"`
 	IfaceID     string `json:"iface_id"`
+}
+
+type mmdsConfigRequest struct {
+	IPv4Address       string      `json:"ipv4_address,omitempty"`
+	NetworkInterfaces []string    `json:"network_interfaces"`
+	Version           MMDSVersion `json:"version,omitempty"`
+	IMDSCompat        bool        `json:"imds_compat,omitempty"`
 }
 
 type serialRequest struct {
@@ -125,6 +134,24 @@ func (c *apiClient) PutNetworkInterface(ctx context.Context, network NetworkAllo
 	}
 	endpoint := "/network-interfaces/" + url.PathEscape(network.InterfaceID)
 	return c.do(ctx, http.MethodPut, endpoint, body, nil, http.StatusNoContent)
+}
+
+func (c *apiClient) PutMMDSConfig(ctx context.Context, spec MMDSSpec) error {
+	body := mmdsConfigRequest{
+		IPv4Address:       strings.TrimSpace(spec.IPv4Address),
+		NetworkInterfaces: append([]string(nil), spec.NetworkInterfaces...),
+		Version:           spec.Version,
+		IMDSCompat:        spec.IMDSCompat,
+	}
+	return c.do(ctx, http.MethodPut, "/mmds/config", body, nil, http.StatusNoContent)
+}
+
+func (c *apiClient) PutMMDS(ctx context.Context, data any) error {
+	return c.do(ctx, http.MethodPut, "/mmds", data, nil, http.StatusNoContent)
+}
+
+func (c *apiClient) PatchMMDS(ctx context.Context, data any) error {
+	return c.do(ctx, http.MethodPatch, "/mmds", data, nil, http.StatusNoContent)
 }
 
 func (c *apiClient) PutSerial(ctx context.Context, serialOutPath string) error {

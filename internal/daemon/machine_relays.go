@@ -56,6 +56,9 @@ func (d *Daemon) usedMachineRelayPorts(ctx context.Context, machineID contractho
 		if record.ID == machineID {
 			continue
 		}
+		if record.Phase != contracthost.MachinePhaseRunning {
+			continue
+		}
 		if port := machineRelayHostPort(record, name); port != 0 {
 			used[port] = struct{}{}
 		}
