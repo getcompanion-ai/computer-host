@@ -422,7 +422,19 @@ func TestRestoreSnapshotFallsBackToLocalSnapshotNetwork(t *testing.T) {
 	stubGuestSSHPublicKeyReader(hostDaemon)
 	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID, *contracthost.GuestConfig) error { return nil }
 
-	artifactRef := contracthost.ArtifactRef{KernelImageURL: "kernel", RootFSURL: "rootfs"}
+	server := newRestoreArtifactServer(t, map[string][]byte{
+		"/kernel":  []byte("kernel"),
+		"/rootfs":  []byte("rootfs"),
+		"/memory":  []byte("mem"),
+		"/vmstate": []byte("state"),
+		"/system":  []byte("disk"),
+	})
+	defer server.Close()
+
+	artifactRef := contracthost.ArtifactRef{
+		KernelImageURL: server.URL + "/kernel",
+		RootFSURL:      server.URL + "/rootfs",
+	}
 	kernelPath := filepath.Join(root, "artifact-kernel")
 	if err := os.WriteFile(kernelPath, []byte("kernel"), 0o644); err != nil {
 		t.Fatalf("write kernel: %v", err)
@@ -452,22 +464,13 @@ func TestRestoreSnapshotFallsBackToLocalSnapshotNetwork(t *testing.T) {
 		t.Fatalf("create snapshot: %v", err)
 	}
 
-	server := newRestoreArtifactServer(t, map[string][]byte{
-		"/kernel":  []byte("kernel"),
-		"/rootfs":  []byte("rootfs"),
-		"/memory":  []byte("mem"),
-		"/vmstate": []byte("state"),
-		"/system":  []byte("disk"),
-	})
-	defer server.Close()
-
 	response, err := hostDaemon.RestoreSnapshot(context.Background(), "snap1", contracthost.RestoreSnapshotRequest{
 		MachineID: "restored",
 		Artifact: contracthost.ArtifactRef{
 			KernelImageURL: server.URL + "/kernel",
 			RootFSURL:      server.URL + "/rootfs",
 		},
-		Snapshot: contracthost.DurableSnapshotSpec{
+		Snapshot: &contracthost.DurableSnapshotSpec{
 			SnapshotID: "snap1",
 			MachineID:  "source",
 			ImageID:    "image-1",
@@ -507,6 +510,134 @@ func TestRestoreSnapshotFallsBackToLocalSnapshotNetwork(t *testing.T) {
 	}
 	if len(ops) != 0 {
 		t.Fatalf("operation journal should be empty after successful restore: got %d entries", len(ops))
+	}
+}
+
+func TestRestoreSnapshotUsesLocalSnapshotArtifacts(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	sshListener := listenTestPort(t, int(defaultSSHPort))
+	defer func() { _ = sshListener.Close() }()
+	vncListener := listenTestPort(t, int(defaultVNCPort))
+	defer func() { _ = vncListener.Close() }()
+
+	startedAt := time.Unix(1700000199, 0).UTC()
+	runtime := &fakeRuntime{
+		bootState: firecracker.MachineState{
+			ID:          "restored-local",
+			Phase:       firecracker.PhaseRunning,
+			PID:         1234,
+			RuntimeHost: "127.0.0.1",
+			SocketPath:  filepath.Join(cfg.RuntimeDir, "machines", "restored-local", "root", "run", "firecracker.sock"),
+			TapName:     "fctap0",
+			StartedAt:   &startedAt,
+		},
+	}
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
+	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID, *contracthost.GuestConfig) error { return nil }
+
+	server := newRestoreArtifactServer(t, map[string][]byte{
+		"/kernel": []byte("kernel"),
+		"/rootfs": []byte("rootfs"),
+	})
+	defer server.Close()
+
+	artifactRef := contracthost.ArtifactRef{
+		KernelImageURL: server.URL + "/kernel",
+		RootFSURL:      server.URL + "/rootfs",
+	}
+	artifactDir := filepath.Join(root, "artifact")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("create artifact dir: %v", err)
+	}
+	kernelPath := filepath.Join(artifactDir, "vmlinux")
+	rootFSPath := filepath.Join(artifactDir, "rootfs.ext4")
+	if err := os.WriteFile(kernelPath, []byte("kernel"), 0o644); err != nil {
+		t.Fatalf("write kernel: %v", err)
+	}
+	if err := os.WriteFile(rootFSPath, []byte("rootfs"), 0o644); err != nil {
+		t.Fatalf("write rootfs: %v", err)
+	}
+	if err := fileStore.PutArtifact(context.Background(), model.ArtifactRecord{
+		Ref:             artifactRef,
+		LocalKey:        "artifact",
+		LocalDir:        artifactDir,
+		KernelImagePath: kernelPath,
+		RootFSPath:      rootFSPath,
+		CreatedAt:       time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+
+	snapshotDir := filepath.Join(root, "snapshots", "snap-local")
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
+		t.Fatalf("create snapshot dir: %v", err)
+	}
+	memoryPath := filepath.Join(snapshotDir, "memory.bin")
+	vmstatePath := filepath.Join(snapshotDir, "vmstate.bin")
+	systemPath := filepath.Join(snapshotDir, "system.img")
+	if err := os.WriteFile(memoryPath, []byte("mem"), 0o644); err != nil {
+		t.Fatalf("write memory: %v", err)
+	}
+	if err := os.WriteFile(vmstatePath, []byte("state"), 0o644); err != nil {
+		t.Fatalf("write vmstate: %v", err)
+	}
+	if err := os.WriteFile(systemPath, []byte("disk"), 0o644); err != nil {
+		t.Fatalf("write system disk: %v", err)
+	}
+	if err := fileStore.CreateSnapshot(context.Background(), model.SnapshotRecord{
+		ID:            "snap-local",
+		MachineID:     "source",
+		Artifact:      artifactRef,
+		MemFilePath:   memoryPath,
+		StateFilePath: vmstatePath,
+		DiskPaths:     []string{systemPath},
+		Artifacts: []model.SnapshotArtifactRecord{
+			{ID: "memory", Kind: contracthost.SnapshotArtifactKindMemory, Name: "memory.bin", LocalPath: memoryPath, SizeBytes: 3},
+			{ID: "vmstate", Kind: contracthost.SnapshotArtifactKindVMState, Name: "vmstate.bin", LocalPath: vmstatePath, SizeBytes: 5},
+			{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", LocalPath: systemPath, SizeBytes: 4},
+		},
+		SourceRuntimeHost: "172.16.0.2",
+		SourceTapDevice:   "fctap0",
+		CreatedAt:         time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+
+	response, err := hostDaemon.RestoreSnapshot(context.Background(), "snap-local", contracthost.RestoreSnapshotRequest{
+		MachineID: "restored-local",
+		Artifact:  artifactRef,
+		LocalSnapshot: &contracthost.LocalSnapshotSpec{
+			SnapshotID: "snap-local",
+		},
+		GuestConfig: &contracthost.GuestConfig{Hostname: "restored-local-shell"},
+	})
+	if err != nil {
+		t.Fatalf("restore snapshot: %v", err)
+	}
+	if response.Machine.ID != "restored-local" {
+		t.Fatalf("restored machine id mismatch: got %q", response.Machine.ID)
+	}
+	if runtime.restoreCalls != 1 {
+		t.Fatalf("restore boot call count mismatch: got %d want 1", runtime.restoreCalls)
+	}
+	if runtime.lastLoadSpec.Network == nil {
+		t.Fatalf("restore boot should preserve local snapshot network")
+	}
+	if got := runtime.lastLoadSpec.Network.GuestIP().String(); got != "172.16.0.2" {
+		t.Fatalf("restore guest ip mismatch: got %q want %q", got, "172.16.0.2")
+	}
+	if got := runtime.lastLoadSpec.Network.TapName; got != "fctap0" {
+		t.Fatalf("restore tap mismatch: got %q want %q", got, "fctap0")
 	}
 }
 
@@ -565,7 +696,7 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 			KernelImageURL: server.URL + "/kernel",
 			RootFSURL:      server.URL + "/rootfs",
 		},
-		Snapshot: contracthost.DurableSnapshotSpec{
+		Snapshot: &contracthost.DurableSnapshotSpec{
 			SnapshotID:        "snap1",
 			MachineID:         "source",
 			ImageID:           "image-1",
@@ -666,7 +797,7 @@ func TestRestoreSnapshotRejectsWhenRestoreNetworkInUseOnHost(t *testing.T) {
 			KernelImageURL: "https://example.com/kernel",
 			RootFSURL:      "https://example.com/rootfs",
 		},
-		Snapshot: contracthost.DurableSnapshotSpec{
+		Snapshot: &contracthost.DurableSnapshotSpec{
 			SnapshotID:        "snap1",
 			MachineID:         "source",
 			ImageID:           "image-1",

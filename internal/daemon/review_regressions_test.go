@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
 	hoststore "github.com/getcompanion-ai/computer-host/internal/store"
+	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
 type blockingPublishedPortStore struct {
@@ -509,7 +509,7 @@ func TestRestoreSnapshotTransitionsToStartingWithoutRelayAllocation(t *testing.T
 			KernelImageURL: server.URL + "/kernel",
 			RootFSURL:      server.URL + "/rootfs",
 		},
-		Snapshot: contracthost.DurableSnapshotSpec{
+		Snapshot: &contracthost.DurableSnapshotSpec{
 			SnapshotID: "snap-exhausted",
 			MachineID:  "source",
 			ImageID:    "image-1",
@@ -708,7 +708,7 @@ func TestRestoreSnapshotCleansStagingArtifactsAfterSuccess(t *testing.T) {
 			KernelImageURL: server.URL + "/kernel",
 			RootFSURL:      server.URL + "/rootfs",
 		},
-		Snapshot: contracthost.DurableSnapshotSpec{
+		Snapshot: &contracthost.DurableSnapshotSpec{
 			SnapshotID:        "snap-clean",
 			MachineID:         "source",
 			ImageID:           "image-1",
@@ -759,7 +759,7 @@ func TestRestoreSnapshotCleansStagingArtifactsAfterDownloadFailure(t *testing.T)
 			KernelImageURL: server.URL + "/kernel",
 			RootFSURL:      server.URL + "/rootfs",
 		},
-		Snapshot: contracthost.DurableSnapshotSpec{
+		Snapshot: &contracthost.DurableSnapshotSpec{
 			SnapshotID:        "snap-fail-clean",
 			MachineID:         "source",
 			ImageID:           "image-1",
