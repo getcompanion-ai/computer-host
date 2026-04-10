@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
+	contracthost "github.com/getcompanion-ai/computer-host/contract"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
 	"github.com/getcompanion-ai/computer-host/internal/store"
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
 func (d *Daemon) GetMachine(ctx context.Context, id contracthost.MachineID) (*contracthost.GetMachineResponse, error) {
@@ -386,6 +386,9 @@ func (d *Daemon) reconcileMachine(ctx context.Context, machineID contracthost.Ma
 		}
 		if !ready {
 			return record, nil
+		}
+		if err := d.personalizeGuest(ctx, record, *state); err != nil {
+			return d.failMachineStartup(ctx, record, err.Error())
 		}
 		guestSSHPublicKey, err := d.readGuestSSHPublicKey(ctx, state.RuntimeHost)
 		if err != nil {

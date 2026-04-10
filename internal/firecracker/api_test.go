@@ -38,6 +38,7 @@ func TestPutSnapshotLoadIncludesNetworkOverrides(t *testing.T) {
 				HostDevName: "fctap7",
 			},
 		},
+		VsockOverride: &VsockOverride{UDSPath: "/run/microagent-personalizer.vsock"},
 	})
 	if err != nil {
 		t.Fatalf("put snapshot load: %v", err)
@@ -47,7 +48,7 @@ func TestPutSnapshotLoadIncludesNetworkOverrides(t *testing.T) {
 		t.Fatalf("request path mismatch: got %q want %q", gotPath, "/snapshot/load")
 	}
 
-	want := "{\"snapshot_path\":\"vmstate.bin\",\"mem_backend\":{\"backend_type\":\"File\",\"backend_path\":\"memory.bin\"},\"resume_vm\":false,\"network_overrides\":[{\"iface_id\":\"net0\",\"host_dev_name\":\"fctap7\"}]}"
+	want := "{\"snapshot_path\":\"vmstate.bin\",\"mem_backend\":{\"backend_type\":\"File\",\"backend_path\":\"memory.bin\"},\"resume_vm\":false,\"network_overrides\":[{\"iface_id\":\"net0\",\"host_dev_name\":\"fctap7\"}],\"vsock_override\":{\"uds_path\":\"/run/microagent-personalizer.vsock\"}}"
 	if gotBody != want {
 		t.Fatalf("request body mismatch:\n got: %s\nwant: %s", gotBody, want)
 	}

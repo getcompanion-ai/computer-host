@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
+	contracthost "github.com/getcompanion-ai/computer-host/contract"
 	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
 	"github.com/getcompanion-ai/computer-host/internal/store"
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
 type fakeRuntime struct {
@@ -27,6 +27,7 @@ type fakeRuntime struct {
 	deleteCalls  []firecracker.MachineState
 	lastSpec     firecracker.MachineSpec
 	lastLoadSpec firecracker.SnapshotLoadSpec
+	mmdsWrites   []any
 }
 
 func (f *fakeRuntime) Boot(_ context.Context, spec firecracker.MachineSpec, _ []firecracker.NetworkAllocation) (*firecracker.MachineState, error) {
@@ -62,6 +63,11 @@ func (f *fakeRuntime) RestoreBoot(_ context.Context, spec firecracker.SnapshotLo
 	f.restoreCalls++
 	f.lastLoadSpec = spec
 	return &f.bootState, nil
+}
+
+func (f *fakeRuntime) PutMMDS(_ context.Context, _ firecracker.MachineState, data any) error {
+	f.mmdsWrites = append(f.mmdsWrites, data)
+	return nil
 }
 
 func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
@@ -173,6 +179,15 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	if runtime.lastSpec.MMDS == nil {
 		t.Fatalf("expected MMDS configuration on machine spec")
 	}
+	if runtime.lastSpec.Vsock == nil {
+		t.Fatalf("expected vsock configuration on machine spec")
+	}
+	if runtime.lastSpec.Vsock.ID != defaultGuestPersonalizationVsockID {
+		t.Fatalf("vsock id mismatch: got %q", runtime.lastSpec.Vsock.ID)
+	}
+	if runtime.lastSpec.Vsock.CID < minGuestVsockCID {
+		t.Fatalf("vsock cid mismatch: got %d", runtime.lastSpec.Vsock.CID)
+	}
 	if runtime.lastSpec.MMDS.Version != firecracker.MMDSVersionV2 {
 		t.Fatalf("mmds version mismatch: got %q", runtime.lastSpec.MMDS.Version)
 	}
@@ -283,6 +298,70 @@ func TestStopMachineSyncsGuestFilesystemBeforeDelete(t *testing.T) {
 	}
 	if stopped.RuntimeHost != "" {
 		t.Fatalf("runtime host should be cleared after stop, got %q", stopped.RuntimeHost)
+	}
+}
+
+func TestReconcileStartingMachinePersonalizesBeforeRunning(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	sshListener := listenTestPort(t, int(defaultSSHPort))
+	defer func() { _ = sshListener.Close() }()
+	vncListener := listenTestPort(t, int(defaultVNCPort))
+	defer func() { _ = vncListener.Close() }()
+
+	startedAt := time.Unix(1700000100, 0).UTC()
+	runtime := &fakeRuntime{}
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	t.Cleanup(func() { hostDaemon.stopMachineRelays("vm-starting") })
+
+	personalized := false
+	hostDaemon.personalizeGuest = func(_ context.Context, record *model.MachineRecord, state firecracker.MachineState) error {
+		personalized = true
+		if record.ID != "vm-starting" {
+			t.Fatalf("personalized machine mismatch: got %q", record.ID)
+		}
+		if state.RuntimeHost != "127.0.0.1" || state.PID != 4321 {
+			t.Fatalf("personalized state mismatch: %#v", state)
+		}
+		return nil
+	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
+
+	if err := fileStore.CreateMachine(context.Background(), model.MachineRecord{
+		ID:             "vm-starting",
+		SystemVolumeID: "vm-starting-system",
+		RuntimeHost:    "127.0.0.1",
+		TapDevice:      "fctap-starting",
+		Ports:          defaultMachinePorts(),
+		Phase:          contracthost.MachinePhaseStarting,
+		PID:            4321,
+		SocketPath:     filepath.Join(cfg.RuntimeDir, "machines", "vm-starting", "root", "run", "firecracker.sock"),
+		CreatedAt:      time.Now().UTC(),
+		StartedAt:      &startedAt,
+	}); err != nil {
+		t.Fatalf("create machine: %v", err)
+	}
+
+	response, err := hostDaemon.GetMachine(context.Background(), "vm-starting")
+	if err != nil {
+		t.Fatalf("GetMachine returned error: %v", err)
+	}
+	if !personalized {
+		t.Fatalf("guest personalization was not called")
+	}
+	if response.Machine.Phase != contracthost.MachinePhaseRunning {
+		t.Fatalf("machine phase = %q, want %q", response.Machine.Phase, contracthost.MachinePhaseRunning)
+	}
+	if response.Machine.GuestSSHPublicKey == "" {
+		t.Fatalf("guest ssh public key should be recorded after convergence")
 	}
 }
 
@@ -406,6 +485,9 @@ func TestRestoreSnapshotFallsBackToLocalSnapshotNetwork(t *testing.T) {
 	if response.Machine.ID != "restored" {
 		t.Fatalf("restored machine id mismatch: got %q", response.Machine.ID)
 	}
+	if response.Machine.Phase != contracthost.MachinePhaseStarting {
+		t.Fatalf("restored machine phase mismatch: got %q", response.Machine.Phase)
+	}
 	if runtime.restoreCalls != 1 {
 		t.Fatalf("restore boot call count mismatch: got %d want 1", runtime.restoreCalls)
 	}
@@ -462,13 +544,8 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 		t.Fatalf("create daemon: %v", err)
 	}
 	stubGuestSSHPublicKeyReader(hostDaemon)
-	var reconfiguredHost string
-	var reconfiguredMachine contracthost.MachineID
-	var reconfiguredConfig *contracthost.GuestConfig
 	hostDaemon.reconfigureGuestIdentity = func(_ context.Context, host string, machineID contracthost.MachineID, guestConfig *contracthost.GuestConfig) error {
-		reconfiguredHost = host
-		reconfiguredMachine = machineID
-		reconfiguredConfig = cloneGuestConfig(guestConfig)
+		t.Fatalf("restore snapshot should not synchronously reconfigure guest identity, host=%q machine=%q guest_config=%#v", host, machineID, guestConfig)
 		return nil
 	}
 
@@ -509,6 +586,9 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 	if response.Machine.ID != "restored" {
 		t.Fatalf("restored machine id mismatch: got %q", response.Machine.ID)
 	}
+	if response.Machine.Phase != contracthost.MachinePhaseStarting {
+		t.Fatalf("restored machine phase mismatch: got %q", response.Machine.Phase)
+	}
 	if runtime.restoreCalls != 1 {
 		t.Fatalf("restore boot call count mismatch: got %d want 1", runtime.restoreCalls)
 	}
@@ -527,19 +607,16 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 	}), "kernel")) {
 		t.Fatalf("restore boot kernel path mismatch: got %q", runtime.lastLoadSpec.KernelImagePath)
 	}
-	if reconfiguredHost != "127.0.0.1" || reconfiguredMachine != "restored" {
-		t.Fatalf("guest identity reconfigure mismatch: host=%q machine=%q", reconfiguredHost, reconfiguredMachine)
-	}
-	if reconfiguredConfig == nil || reconfiguredConfig.Hostname != "restored-shell" {
-		t.Fatalf("guest identity hostname mismatch: %#v", reconfiguredConfig)
-	}
 
 	machine, err := fileStore.GetMachine(context.Background(), "restored")
 	if err != nil {
 		t.Fatalf("get restored machine: %v", err)
 	}
-	if machine.Phase != contracthost.MachinePhaseRunning {
+	if machine.Phase != contracthost.MachinePhaseStarting {
 		t.Fatalf("restored machine phase mismatch: got %q", machine.Phase)
+	}
+	if machine.GuestConfig == nil || machine.GuestConfig.Hostname != "restored-shell" {
+		t.Fatalf("stored guest config mismatch: %#v", machine.GuestConfig)
 	}
 	if len(machine.UserVolumeIDs) != 1 {
 		t.Fatalf("restored machine user volumes mismatch: got %#v", machine.UserVolumeIDs)

@@ -132,7 +132,7 @@ func stageMachineFiles(spec MachineSpec, paths machinePaths) (MachineSpec, error
 
 	if spec.Vsock != nil {
 		vsock := *spec.Vsock
-		vsock.Path = jailedVSockPath(spec)
+		vsock.Path = jailedVSockDevicePath(*spec.Vsock)
 		staged.Vsock = &vsock
 	}
 
@@ -244,11 +244,8 @@ func waitForPIDFile(ctx context.Context, pidFilePath string) (int, error) {
 	}
 }
 
-func jailedVSockPath(spec MachineSpec) string {
-	if spec.Vsock == nil {
-		return ""
-	}
-	return path.Join(defaultVSockRunDir, filepath.Base(strings.TrimSpace(spec.Vsock.Path)))
+func jailedVSockDevicePath(spec VsockSpec) string {
+	return path.Join(defaultVSockRunDir, filepath.Base(strings.TrimSpace(spec.Path)))
 }
 
 func linkMachineFile(source string, target string) error {

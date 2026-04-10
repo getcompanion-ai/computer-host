@@ -331,6 +331,11 @@ func (r *Runtime) RestoreBoot(ctx context.Context, loadSpec SnapshotLoadSpec, us
 		}
 	}
 
+	var vsockOverride *VsockOverride
+	if loadSpec.Vsock != nil {
+		vsockOverride = &VsockOverride{UDSPath: jailedVSockDevicePath(*loadSpec.Vsock)}
+	}
+
 	// Load snapshot (replaces the full configure+start sequence)
 	if err := client.PutSnapshotLoad(ctx, SnapshotLoadParams{
 		SnapshotPath: chrootStatePath,
@@ -345,6 +350,7 @@ func (r *Runtime) RestoreBoot(ctx context.Context, loadSpec SnapshotLoadSpec, us
 				HostDevName: network.TapName,
 			},
 		},
+		VsockOverride: vsockOverride,
 	}); err != nil {
 		cleanup(network, paths, command, firecrackerPID)
 		return nil, fmt.Errorf("load snapshot: %w", err)
@@ -367,6 +373,11 @@ func (r *Runtime) RestoreBoot(ctx context.Context, loadSpec SnapshotLoadSpec, us
 		StartedAt:   &now,
 	}
 	return &state, nil
+}
+
+func (r *Runtime) PutMMDS(ctx context.Context, state MachineState, data any) error {
+	client := newAPIClient(state.SocketPath)
+	return client.PutMMDS(ctx, data)
 }
 
 func processExists(pid int) bool {

@@ -168,6 +168,74 @@ func TestConfigureMachineConfiguresMMDSBeforeStart(t *testing.T) {
 	}
 }
 
+func TestConfigureMachineConfiguresVsockBeforeStart(t *testing.T) {
+	var requests []capturedRequest
+
+	socketPath, shutdown := startUnixSocketServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		requests = append(requests, capturedRequest{
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Body:   string(body),
+		})
+		w.WriteHeader(http.StatusNoContent)
+	})
+	defer shutdown()
+
+	client := newAPIClient(socketPath)
+	spec := MachineSpec{
+		ID:              "vm-3",
+		VCPUs:           1,
+		MemoryMiB:       512,
+		KernelImagePath: "/kernel",
+		RootFSPath:      "/rootfs",
+		Vsock: &VsockSpec{
+			ID:   "microagent-personalizer",
+			CID:  42,
+			Path: "/run/microagent-personalizer.vsock",
+		},
+	}
+	paths := machinePaths{JailedSerialLogPath: "/logs/serial.log"}
+	network := NetworkAllocation{
+		InterfaceID: defaultInterfaceID,
+		TapName:     "fctap0",
+		GuestMAC:    "06:00:ac:10:00:02",
+	}
+
+	if err := configureMachine(context.Background(), client, paths, spec, network); err != nil {
+		t.Fatalf("configure machine: %v", err)
+	}
+
+	gotPaths := make([]string, 0, len(requests))
+	for _, request := range requests {
+		gotPaths = append(gotPaths, request.Path)
+	}
+	wantPaths := []string{
+		"/machine-config",
+		"/boot-source",
+		"/drives/root_drive",
+		"/network-interfaces/net0",
+		"/entropy",
+		"/serial",
+		"/vsock",
+		"/actions",
+	}
+	if len(gotPaths) != len(wantPaths) {
+		t.Fatalf("request count mismatch: got %d want %d (%v)", len(gotPaths), len(wantPaths), gotPaths)
+	}
+	for i := range wantPaths {
+		if gotPaths[i] != wantPaths[i] {
+			t.Fatalf("request %d mismatch: got %q want %q", i, gotPaths[i], wantPaths[i])
+		}
+	}
+	if requests[6].Body != "{\"guest_cid\":42,\"uds_path\":\"/run/microagent-personalizer.vsock\"}" {
+		t.Fatalf("vsock body mismatch: got %q", requests[6].Body)
+	}
+}
+
 func startUnixSocketServer(t *testing.T, handler http.HandlerFunc) (string, func()) {
 	t.Helper()
 

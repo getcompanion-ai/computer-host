@@ -8,22 +8,21 @@ import (
 	"sync"
 	"time"
 
+	contracthost "github.com/getcompanion-ai/computer-host/contract"
 	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
+	"github.com/getcompanion-ai/computer-host/internal/model"
 	"github.com/getcompanion-ai/computer-host/internal/store"
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
 const (
-	defaultGuestKernelArgs        = "console=ttyS0 reboot=k panic=1 pci=off"
-	defaultGuestMemoryMiB         = int64(512)
-	defaultGuestVCPUs             = int64(1)
-	defaultSSHPort                = uint16(2222)
-	defaultVNCPort                = uint16(6080)
-	defaultCopyBufferSize         = 1024 * 1024
-	defaultGuestDialTimeout       = 500 * time.Millisecond
-	defaultGuestReadyPollInterval = 100 * time.Millisecond
-	defaultGuestReadyTimeout      = 30 * time.Second
+	defaultGuestKernelArgs  = "console=ttyS0 reboot=k panic=1 pci=off"
+	defaultGuestMemoryMiB   = int64(512)
+	defaultGuestVCPUs       = int64(1)
+	defaultSSHPort          = uint16(2222)
+	defaultVNCPort          = uint16(6080)
+	defaultCopyBufferSize   = 1024 * 1024
+	defaultGuestDialTimeout = 500 * time.Millisecond
 )
 
 type Runtime interface {
@@ -34,6 +33,7 @@ type Runtime interface {
 	Resume(context.Context, firecracker.MachineState) error
 	CreateSnapshot(context.Context, firecracker.MachineState, firecracker.SnapshotPaths) error
 	RestoreBoot(context.Context, firecracker.SnapshotLoadSpec, []firecracker.NetworkAllocation) (*firecracker.MachineState, error)
+	PutMMDS(context.Context, firecracker.MachineState, any) error
 }
 
 type Daemon struct {
@@ -44,6 +44,7 @@ type Daemon struct {
 	reconfigureGuestIdentity func(context.Context, string, contracthost.MachineID, *contracthost.GuestConfig) error
 	readGuestSSHPublicKey    func(context.Context, string) (string, error)
 	syncGuestFilesystem      func(context.Context, string) error
+	personalizeGuest         func(context.Context, *model.MachineRecord, firecracker.MachineState) error
 
 	locksMu       sync.Mutex
 	machineLocks  map[contracthost.MachineID]*sync.Mutex
@@ -78,6 +79,7 @@ func New(cfg appconfig.Config, store store.Store, runtime Runtime) (*Daemon, err
 		runtime:                  runtime,
 		reconfigureGuestIdentity: nil,
 		readGuestSSHPublicKey:    nil,
+		personalizeGuest:         nil,
 		machineLocks:             make(map[contracthost.MachineID]*sync.Mutex),
 		artifactLocks:            make(map[string]*sync.Mutex),
 		machineRelayListeners:    make(map[string]net.Listener),
@@ -86,6 +88,7 @@ func New(cfg appconfig.Config, store store.Store, runtime Runtime) (*Daemon, err
 	daemon.reconfigureGuestIdentity = daemon.reconfigureGuestIdentityOverSSH
 	daemon.readGuestSSHPublicKey = readGuestSSHPublicKey
 	daemon.syncGuestFilesystem = daemon.syncGuestFilesystemOverSSH
+	daemon.personalizeGuest = daemon.personalizeGuestConfig
 	if err := daemon.ensureBackendSSHKeyPair(); err != nil {
 		return nil, err
 	}

@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
+	contracthost "github.com/getcompanion-ai/computer-host/contract"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
 	hoststore "github.com/getcompanion-ai/computer-host/internal/store"
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
 type blockingPublishedPortStore struct {
@@ -408,7 +408,7 @@ func TestStartMachineTransitionsToStartingWithoutRelayAllocation(t *testing.T) {
 	}
 }
 
-func TestRestoreSnapshotDeletesSystemVolumeRecordWhenRelayAllocationFails(t *testing.T) {
+func TestRestoreSnapshotTransitionsToStartingWithoutRelayAllocation(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
 	baseStore, err := hoststore.NewFileStore(cfg.StatePath, cfg.OperationsPath)
@@ -420,15 +420,6 @@ func TestRestoreSnapshotDeletesSystemVolumeRecordWhenRelayAllocationFails(t *tes
 		Store:         baseStore,
 		extraMachines: exhaustedMachineRelayRecords(),
 	}
-
-	sshListener := listenTestPort(t, int(defaultSSHPort))
-	defer func() {
-		_ = sshListener.Close()
-	}()
-	vncListener := listenTestPort(t, int(defaultVNCPort))
-	defer func() {
-		_ = vncListener.Close()
-	}()
 
 	startedAt := time.Unix(1700000300, 0).UTC()
 	runtime := &fakeRuntime{
@@ -448,7 +439,10 @@ func TestRestoreSnapshotDeletesSystemVolumeRecordWhenRelayAllocationFails(t *tes
 		t.Fatalf("create daemon: %v", err)
 	}
 	stubGuestSSHPublicKeyReader(hostDaemon)
-	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID, *contracthost.GuestConfig) error { return nil }
+	hostDaemon.reconfigureGuestIdentity = func(_ context.Context, host string, machineID contracthost.MachineID, guestConfig *contracthost.GuestConfig) error {
+		t.Fatalf("restore snapshot should not synchronously reconfigure guest identity, host=%q machine=%q guest_config=%#v", host, machineID, guestConfig)
+		return nil
+	}
 
 	artifactRef := contracthost.ArtifactRef{KernelImageURL: "kernel", RootFSURL: "rootfs"}
 	kernelPath := filepath.Join(root, "artifact-kernel")
@@ -509,7 +503,7 @@ func TestRestoreSnapshotDeletesSystemVolumeRecordWhenRelayAllocationFails(t *tes
 	})
 	defer server.Close()
 
-	_, err = hostDaemon.RestoreSnapshot(context.Background(), "snap-exhausted", contracthost.RestoreSnapshotRequest{
+	response, err := hostDaemon.RestoreSnapshot(context.Background(), "snap-exhausted", contracthost.RestoreSnapshotRequest{
 		MachineID: "restored-exhausted",
 		Artifact: contracthost.ArtifactRef{
 			KernelImageURL: server.URL + "/kernel",
@@ -526,18 +520,20 @@ func TestRestoreSnapshotDeletesSystemVolumeRecordWhenRelayAllocationFails(t *tes
 			},
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "allocate relay ports for restored machine") {
-		t.Fatalf("RestoreSnapshot error = %v, want relay allocation failure", err)
+	if err != nil {
+		t.Fatalf("RestoreSnapshot returned error: %v", err)
 	}
-
-	if _, err := baseStore.GetVolume(context.Background(), "restored-exhausted-system"); !errors.Is(err, hoststore.ErrNotFound) {
-		t.Fatalf("restored system volume record should be deleted, get err = %v", err)
+	if response.Machine.Phase != contracthost.MachinePhaseStarting {
+		t.Fatalf("restored machine phase = %q, want %q", response.Machine.Phase, contracthost.MachinePhaseStarting)
 	}
-	if _, err := os.Stat(hostDaemon.systemVolumePath("restored-exhausted")); !os.IsNotExist(err) {
-		t.Fatalf("restored system disk should be removed, stat err = %v", err)
+	if _, err := baseStore.GetVolume(context.Background(), "restored-exhausted-system"); err != nil {
+		t.Fatalf("restored system volume record should exist: %v", err)
 	}
-	if len(runtime.deleteCalls) != 1 {
-		t.Fatalf("runtime delete calls = %d, want 1", len(runtime.deleteCalls))
+	if _, err := os.Stat(hostDaemon.systemVolumePath("restored-exhausted")); err != nil {
+		t.Fatalf("restored system disk should exist: %v", err)
+	}
+	if len(runtime.deleteCalls) != 0 {
+		t.Fatalf("runtime delete calls = %d, want 0", len(runtime.deleteCalls))
 	}
 	assertOperationCount(t, baseStore, 0)
 }

@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"time"
 
+	contracthost "github.com/getcompanion-ai/computer-host/contract"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
 	"github.com/getcompanion-ai/computer-host/internal/store"
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
 func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachineRequest) (*contracthost.CreateMachineResponse, error) {
@@ -184,6 +184,7 @@ func (d *Daemon) buildMachineSpec(machineID contracthost.MachineID, artifact *mo
 		KernelArgs: defaultGuestKernelArgs,
 		Drives:     drives,
 		MMDS:       mmds,
+		Vsock:      guestVsockSpec(machineID),
 	}
 	if err := spec.Validate(); err != nil {
 		return firecracker.MachineSpec{}, err

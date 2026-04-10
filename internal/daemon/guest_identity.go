@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -19,10 +20,24 @@ func (d *Daemon) reconfigureGuestIdentityOverSSH(ctx context.Context, runtimeHos
 	if machineName == "" {
 		return fmt.Errorf("machine id is required")
 	}
+	mmds, err := d.guestMetadataSpec(machineID, guestConfig)
+	if err != nil {
+		return err
+	}
+	envelope, ok := mmds.Data.(guestMetadataEnvelope)
+	if !ok {
+		return fmt.Errorf("guest metadata payload has unexpected type %T", mmds.Data)
+	}
+	payloadBytes, err := json.Marshal(envelope.Latest.MetaData)
+	if err != nil {
+		return fmt.Errorf("marshal guest metadata payload: %w", err)
+	}
 
 	privateKeyPath := d.backendSSHPrivateKeyPath()
 	remoteScript := fmt.Sprintf(`set -euo pipefail
-machine_name=%s
+payload=%s
+install -d -m 0755 /etc/microagent
+machine_name="$(printf '%%s' "$payload" | jq -r '.hostname // .machine_id // empty')"
 printf '%%s\n' "$machine_name" >/etc/microagent/machine-name
 printf '%%s\n' "$machine_name" >/etc/hostname
 cat >/etc/hosts <<EOF
@@ -33,7 +48,25 @@ ff02::1 ip6-allnodes
 ff02::2 ip6-allrouters
 EOF
 hostname "$machine_name" >/dev/null 2>&1 || true
-`, strconv.Quote(machineName))
+if printf '%%s' "$payload" | jq -e '.authorized_keys | length > 0' >/dev/null 2>&1; then
+  install -d -m 0700 -o node -g node /home/node/.ssh
+  printf '%%s' "$payload" | jq -r '.authorized_keys[]' >/home/node/.ssh/authorized_keys
+  chmod 0600 /home/node/.ssh/authorized_keys
+  chown node:node /home/node/.ssh/authorized_keys
+  printf '%%s' "$payload" | jq -r '.authorized_keys[]' >/etc/microagent/authorized_keys
+  chmod 0600 /etc/microagent/authorized_keys
+else
+  rm -f /home/node/.ssh/authorized_keys /etc/microagent/authorized_keys
+fi
+if printf '%%s' "$payload" | jq -e '.trusted_user_ca_keys | length > 0' >/dev/null 2>&1; then
+  printf '%%s' "$payload" | jq -r '.trusted_user_ca_keys[]' >/etc/microagent/trusted_user_ca_keys
+  chmod 0644 /etc/microagent/trusted_user_ca_keys
+else
+  rm -f /etc/microagent/trusted_user_ca_keys
+fi
+printf '%%s' "$payload" | jq '{authorized_keys, trusted_user_ca_keys, login_webhook}' >/etc/microagent/guest-config.json
+chmod 0600 /etc/microagent/guest-config.json
+`, strconv.Quote(string(payloadBytes)))
 
 	cmd := exec.CommandContext(
 		ctx,
@@ -43,6 +76,7 @@ hostname "$machine_name" >/dev/null 2>&1 || true
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "IdentitiesOnly=yes",
 		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=2",
 		"-p", strconv.Itoa(int(defaultSSHPort)),
 		"node@"+runtimeHost,
 		"sudo bash -lc "+shellSingleQuote(remoteScript),
@@ -68,6 +102,7 @@ func (d *Daemon) syncGuestFilesystemOverSSH(ctx context.Context, runtimeHost str
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "IdentitiesOnly=yes",
 		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=2",
 		"-p", strconv.Itoa(int(defaultSSHPort)),
 		"node@"+runtimeHost,
 		"sudo bash -lc "+shellSingleQuote("sync"),
