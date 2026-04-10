@@ -17,8 +17,8 @@ import (
 
 const (
 	defaultGuestKernelArgs  = "console=ttyS0 reboot=k panic=1 pci=off"
-	defaultGuestMemoryMiB   = int64(512)
-	defaultGuestVCPUs       = int64(1)
+	defaultGuestMemoryMiB   = int64(3072)
+	defaultGuestVCPUs       = int64(2)
 	defaultSSHPort          = uint16(2222)
 	defaultVNCPort          = uint16(6080)
 	defaultCopyBufferSize   = 1024 * 1024
