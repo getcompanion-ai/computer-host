@@ -23,11 +23,17 @@ type Service interface {
 	UploadSnapshot(context.Context, contracthost.SnapshotID, contracthost.UploadSnapshotRequest) (*contracthost.UploadSnapshotResponse, error)
 	ListSnapshots(context.Context, contracthost.MachineID) (*contracthost.ListSnapshotsResponse, error)
 	GetSnapshot(context.Context, contracthost.SnapshotID) (*contracthost.GetSnapshotResponse, error)
+	GetSnapshotArtifact(context.Context, contracthost.SnapshotID, string) (*SnapshotArtifactContent, error)
 	DeleteSnapshotByID(context.Context, contracthost.SnapshotID) error
 	RestoreSnapshot(context.Context, contracthost.SnapshotID, contracthost.RestoreSnapshotRequest) (*contracthost.RestoreSnapshotResponse, error)
 	CreatePublishedPort(context.Context, contracthost.MachineID, contracthost.CreatePublishedPortRequest) (*contracthost.CreatePublishedPortResponse, error)
 	ListPublishedPorts(context.Context, contracthost.MachineID) (*contracthost.ListPublishedPortsResponse, error)
 	DeletePublishedPort(context.Context, contracthost.MachineID, contracthost.PublishedPortID) error
+}
+
+type SnapshotArtifactContent struct {
+	Name string
+	Path string
 }
 
 type Handler struct {
@@ -295,6 +301,27 @@ func (h *Handler) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, response)
+		return
+	}
+
+	if len(parts) == 3 && parts[1] == "artifacts" {
+		if r.Method != http.MethodGet {
+			writeMethodNotAllowed(w)
+			return
+		}
+		artifact, err := h.service.GetSnapshotArtifact(r.Context(), snapshotID, parts[2])
+		if err != nil {
+			writeError(w, statusForError(err), err)
+			return
+		}
+		if artifact == nil {
+			writeError(w, http.StatusNotFound, fmt.Errorf("snapshot artifact %q not found", parts[2]))
+			return
+		}
+		if artifact.Name != "" {
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", artifact.Name))
+		}
+		http.ServeFile(w, r, artifact.Path)
 		return
 	}
 

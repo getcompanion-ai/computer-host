@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
+	"github.com/getcompanion-ai/computer-host/internal/httpapi"
 	"github.com/getcompanion-ai/computer-host/internal/model"
 	"github.com/getcompanion-ai/computer-host/internal/store"
 	contracthost "github.com/getcompanion-ai/computer-host/contract"
@@ -439,6 +440,37 @@ func (d *Daemon) GetSnapshot(ctx context.Context, snapshotID contracthost.Snapsh
 		return nil, err
 	}
 	return &contracthost.GetSnapshotResponse{Snapshot: snapshotToContract(*snap)}, nil
+}
+
+func (d *Daemon) GetSnapshotArtifact(ctx context.Context, snapshotID contracthost.SnapshotID, artifactID string) (*httpapi.SnapshotArtifactContent, error) {
+	snapshot, err := d.store.GetSnapshot(ctx, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+	artifactID = strings.TrimSpace(artifactID)
+	if artifactID == "" {
+		return nil, fmt.Errorf("snapshot artifact id is required")
+	}
+	for _, artifact := range snapshot.Artifacts {
+		if artifact.ID != artifactID {
+			continue
+		}
+		path := strings.TrimSpace(artifact.LocalPath)
+		if path == "" {
+			return nil, fmt.Errorf("snapshot %q artifact %q not found", snapshotID, artifactID)
+		}
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return nil, fmt.Errorf("snapshot %q artifact %q not found", snapshotID, artifactID)
+			}
+			return nil, fmt.Errorf("stat snapshot %q artifact %q: %w", snapshotID, artifactID, err)
+		}
+		return &httpapi.SnapshotArtifactContent{
+			Name: artifact.Name,
+			Path: path,
+		}, nil
+	}
+	return nil, fmt.Errorf("snapshot %q artifact %q not found", snapshotID, artifactID)
 }
 
 func (d *Daemon) ListSnapshots(ctx context.Context, machineID contracthost.MachineID) (*contracthost.ListSnapshotsResponse, error) {

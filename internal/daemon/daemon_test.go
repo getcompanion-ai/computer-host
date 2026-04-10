@@ -641,6 +641,55 @@ func TestRestoreSnapshotUsesLocalSnapshotArtifacts(t *testing.T) {
 	}
 }
 
+func TestGetSnapshotArtifactReturnsLocalArtifactPath(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	hostDaemon, err := New(cfg, fileStore, &fakeRuntime{})
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+
+	snapshotDir := filepath.Join(root, "snapshots", "snap-artifact")
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
+		t.Fatalf("create snapshot dir: %v", err)
+	}
+	memoryPath := filepath.Join(snapshotDir, "memory.bin")
+	if err := os.WriteFile(memoryPath, []byte("mem"), 0o644); err != nil {
+		t.Fatalf("write memory: %v", err)
+	}
+	if err := fileStore.CreateSnapshot(context.Background(), model.SnapshotRecord{
+		ID:            "snap-artifact",
+		MachineID:     "source",
+		MemFilePath:   memoryPath,
+		StateFilePath: filepath.Join(snapshotDir, "vmstate.bin"),
+		Artifacts: []model.SnapshotArtifactRecord{
+			{ID: "memory", Kind: contracthost.SnapshotArtifactKindMemory, Name: "memory.bin", LocalPath: memoryPath, SizeBytes: 3},
+		},
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+
+	artifact, err := hostDaemon.GetSnapshotArtifact(context.Background(), "snap-artifact", "memory")
+	if err != nil {
+		t.Fatalf("GetSnapshotArtifact returned error: %v", err)
+	}
+	if artifact == nil {
+		t.Fatalf("GetSnapshotArtifact returned nil artifact")
+	}
+	if artifact.Name != "memory.bin" {
+		t.Fatalf("artifact name = %q, want memory.bin", artifact.Name)
+	}
+	if artifact.Path != memoryPath {
+		t.Fatalf("artifact path = %q, want %q", artifact.Path, memoryPath)
+	}
+}
+
 func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
