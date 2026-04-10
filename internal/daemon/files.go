@@ -137,11 +137,19 @@ func validateDiskCloneBackend(cfg appconfig.Config) error {
 	if err := cloneDiskFile(sourcePath, targetPath, cfg.DiskCloneMode); err != nil {
 		return fmt.Errorf("validate disk clone backend from artifacts dir %q to machine disks dir %q: %w", cfg.ArtifactsDir, cfg.MachineDisksDir, err)
 	}
+
+	snapshotProbePath := filepath.Join(cfg.SnapshotsDir, "."+filepath.Base(sourcePath)+".snapshot-target")
+	defer func() {
+		_ = os.Remove(snapshotProbePath)
+	}()
+	if err := cloneDiskFile(targetPath, snapshotProbePath, cfg.DiskCloneMode); err != nil {
+		return fmt.Errorf("validate disk clone backend from machine disks dir %q to snapshots dir %q: %w", cfg.MachineDisksDir, cfg.SnapshotsDir, err)
+	}
 	return nil
 }
 
 func reflinkRequiredError(err error) error {
-	return fmt.Errorf("FIRECRACKER_HOST_DISK_CLONE_MODE=reflink requires a CoW filesystem with reflink support across artifacts and machine-disks; mount FIRECRACKER_HOST_ROOT_DIR on XFS with reflink=1 or Btrfs, preferably on local NVMe, or set FIRECRACKER_HOST_DISK_CLONE_MODE=copy for the slow full-copy fallback: %w", err)
+	return fmt.Errorf("FIRECRACKER_HOST_DISK_CLONE_MODE=reflink requires a CoW filesystem with reflink support across artifacts, machine-disks, and snapshots; mount FIRECRACKER_HOST_ROOT_DIR on XFS with reflink=1 or Btrfs, preferably on local NVMe, or set FIRECRACKER_HOST_DISK_CLONE_MODE=copy for the slow full-copy fallback: %w", err)
 }
 
 func reflinkFile(source string, target string) error {
