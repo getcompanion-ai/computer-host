@@ -251,8 +251,12 @@ func (d *Daemon) mergedGuestConfig(config *contracthost.GuestConfig) (*contracth
 	}
 
 	merged := &contracthost.GuestConfig{
+		Hostname:          "",
 		AuthorizedKeys:    authorizedKeys,
 		TrustedUserCAKeys: nil,
+	}
+	if config != nil {
+		merged.Hostname = strings.TrimSpace(config.Hostname)
 	}
 	if strings.TrimSpace(d.config.GuestLoginCAPublicKey) != "" {
 		merged.TrustedUserCAKeys = append(merged.TrustedUserCAKeys, d.config.GuestLoginCAPublicKey)
@@ -446,6 +450,21 @@ func validateArtifactRef(ref contracthost.ArtifactRef) error {
 func validateGuestConfig(config *contracthost.GuestConfig) error {
 	if config == nil {
 		return nil
+	}
+	if config.Hostname != "" {
+		hostname := strings.TrimSpace(config.Hostname)
+		if hostname == "" {
+			return fmt.Errorf("guest_config.hostname is required")
+		}
+		if len(hostname) > 63 {
+			return fmt.Errorf("guest_config.hostname must be 63 characters or fewer")
+		}
+		if strings.ContainsAny(hostname, "/\\") {
+			return fmt.Errorf("guest_config.hostname must not contain path separators")
+		}
+		if strings.ContainsAny(hostname, " \t\r\n") {
+			return fmt.Errorf("guest_config.hostname must not contain whitespace")
+		}
 	}
 	for i, key := range config.AuthorizedKeys {
 		if strings.TrimSpace(key) == "" {

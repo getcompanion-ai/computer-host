@@ -128,6 +128,7 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 			RootFSURL:      server.URL + "/rootfs",
 		},
 		GuestConfig: &contracthost.GuestConfig{
+			Hostname: "workbox",
 			AuthorizedKeys: []string{
 				"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOverrideKey daemon-test",
 			},
@@ -179,7 +180,7 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	if !ok {
 		t.Fatalf("mmds payload type mismatch: got %T", runtime.lastSpec.MMDS.Data)
 	}
-	if payload.Latest.MetaData.Hostname != "vm-1" {
+	if payload.Latest.MetaData.Hostname != "workbox" {
 		t.Fatalf("mmds hostname mismatch: got %q", payload.Latest.MetaData.Hostname)
 	}
 	authorizedKeys := strings.Join(payload.Latest.MetaData.AuthorizedKeys, "\n")
@@ -340,7 +341,7 @@ func TestRestoreSnapshotFallsBackToLocalSnapshotNetwork(t *testing.T) {
 		t.Fatalf("create daemon: %v", err)
 	}
 	stubGuestSSHPublicKeyReader(hostDaemon)
-	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID) error { return nil }
+	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID, *contracthost.GuestConfig) error { return nil }
 
 	artifactRef := contracthost.ArtifactRef{KernelImageURL: "kernel", RootFSURL: "rootfs"}
 	kernelPath := filepath.Join(root, "artifact-kernel")
@@ -397,6 +398,7 @@ func TestRestoreSnapshotFallsBackToLocalSnapshotNetwork(t *testing.T) {
 				{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", DownloadURL: server.URL + "/system"},
 			},
 		},
+		GuestConfig: &contracthost.GuestConfig{Hostname: "restored-shell"},
 	})
 	if err != nil {
 		t.Fatalf("restore snapshot: %v", err)
@@ -462,9 +464,11 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 	stubGuestSSHPublicKeyReader(hostDaemon)
 	var reconfiguredHost string
 	var reconfiguredMachine contracthost.MachineID
-	hostDaemon.reconfigureGuestIdentity = func(_ context.Context, host string, machineID contracthost.MachineID) error {
+	var reconfiguredConfig *contracthost.GuestConfig
+	hostDaemon.reconfigureGuestIdentity = func(_ context.Context, host string, machineID contracthost.MachineID, guestConfig *contracthost.GuestConfig) error {
 		reconfiguredHost = host
 		reconfiguredMachine = machineID
+		reconfiguredConfig = cloneGuestConfig(guestConfig)
 		return nil
 	}
 
@@ -497,6 +501,7 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 				{ID: "disk-user-0", Kind: contracthost.SnapshotArtifactKindDisk, Name: "user-0.img", DownloadURL: server.URL + "/user-0"},
 			},
 		},
+		GuestConfig: &contracthost.GuestConfig{Hostname: "restored-shell"},
 	})
 	if err != nil {
 		t.Fatalf("restore snapshot: %v", err)
@@ -524,6 +529,9 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 	}
 	if reconfiguredHost != "127.0.0.1" || reconfiguredMachine != "restored" {
 		t.Fatalf("guest identity reconfigure mismatch: host=%q machine=%q", reconfiguredHost, reconfiguredMachine)
+	}
+	if reconfiguredConfig == nil || reconfiguredConfig.Hostname != "restored-shell" {
+		t.Fatalf("guest identity hostname mismatch: %#v", reconfiguredConfig)
 	}
 
 	machine, err := fileStore.GetMachine(context.Background(), "restored")

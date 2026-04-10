@@ -10,9 +10,9 @@ import (
 	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
-func (d *Daemon) reconfigureGuestIdentityOverSSH(ctx context.Context, runtimeHost string, machineID contracthost.MachineID) error {
+func (d *Daemon) reconfigureGuestIdentityOverSSH(ctx context.Context, runtimeHost string, machineID contracthost.MachineID, guestConfig *contracthost.GuestConfig) error {
 	runtimeHost = strings.TrimSpace(runtimeHost)
-	machineName := strings.TrimSpace(string(machineID))
+	machineName := guestHostname(machineID, guestConfig)
 	if runtimeHost == "" {
 		return fmt.Errorf("guest runtime host is required")
 	}

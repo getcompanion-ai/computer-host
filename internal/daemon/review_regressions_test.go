@@ -448,7 +448,7 @@ func TestRestoreSnapshotDeletesSystemVolumeRecordWhenRelayAllocationFails(t *tes
 		t.Fatalf("create daemon: %v", err)
 	}
 	stubGuestSSHPublicKeyReader(hostDaemon)
-	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID) error { return nil }
+	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID, *contracthost.GuestConfig) error { return nil }
 
 	artifactRef := contracthost.ArtifactRef{KernelImageURL: "kernel", RootFSURL: "rootfs"}
 	kernelPath := filepath.Join(root, "artifact-kernel")
@@ -695,7 +695,7 @@ func TestRestoreSnapshotCleansStagingArtifactsAfterSuccess(t *testing.T) {
 		t.Fatalf("create daemon: %v", err)
 	}
 	stubGuestSSHPublicKeyReader(hostDaemon)
-	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID) error { return nil }
+	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID, *contracthost.GuestConfig) error { return nil }
 
 	server := newRestoreArtifactServer(t, map[string][]byte{
 		"/kernel":  []byte("kernel"),

@@ -35,6 +35,7 @@ func cloneGuestConfig(config *contracthost.GuestConfig) *contracthost.GuestConfi
 		return nil
 	}
 	cloned := &contracthost.GuestConfig{
+		Hostname:          config.Hostname,
 		AuthorizedKeys:    append([]string(nil), config.AuthorizedKeys...),
 		TrustedUserCAKeys: append([]string(nil), config.TrustedUserCAKeys...),
 	}
@@ -45,8 +46,17 @@ func cloneGuestConfig(config *contracthost.GuestConfig) *contracthost.GuestConfi
 	return cloned
 }
 
+func guestHostname(machineID contracthost.MachineID, guestConfig *contracthost.GuestConfig) string {
+	if guestConfig != nil {
+		if hostname := strings.TrimSpace(guestConfig.Hostname); hostname != "" {
+			return hostname
+		}
+	}
+	return strings.TrimSpace(string(machineID))
+}
+
 func (d *Daemon) guestMetadataSpec(machineID contracthost.MachineID, guestConfig *contracthost.GuestConfig) (*firecracker.MMDSSpec, error) {
-	name := strings.TrimSpace(string(machineID))
+	name := guestHostname(machineID, guestConfig)
 	if name == "" {
 		return nil, fmt.Errorf("machine id is required")
 	}

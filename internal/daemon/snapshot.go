@@ -222,6 +222,13 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 	if err := validateArtifactRef(req.Artifact); err != nil {
 		return nil, err
 	}
+	if err := validateGuestConfig(req.GuestConfig); err != nil {
+		return nil, err
+	}
+	guestConfig, err := d.mergedGuestConfig(req.GuestConfig)
+	if err != nil {
+		return nil, err
+	}
 
 	unlock := d.lockMachine(req.MachineID)
 	defer unlock()
@@ -349,7 +356,7 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		clearOperation = true
 		return nil, fmt.Errorf("wait for restored guest ready: %w", err)
 	}
-	if err := d.reconfigureGuestIdentity(ctx, machineState.RuntimeHost, req.MachineID); err != nil {
+	if err := d.reconfigureGuestIdentity(ctx, machineState.RuntimeHost, req.MachineID, guestConfig); err != nil {
 		_ = d.runtime.Delete(ctx, *machineState)
 		_ = os.RemoveAll(filepath.Dir(newSystemDiskPath))
 		clearOperation = true
@@ -406,6 +413,7 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 	machineRecord := model.MachineRecord{
 		ID:                req.MachineID,
 		Artifact:          req.Artifact,
+		GuestConfig:       cloneGuestConfig(guestConfig),
 		SystemVolumeID:    systemVolumeID,
 		UserVolumeIDs:     restoredUserVolumeIDs,
 		RuntimeHost:       machineState.RuntimeHost,

@@ -41,7 +41,7 @@ type Daemon struct {
 	store   store.Store
 	runtime Runtime
 
-	reconfigureGuestIdentity func(context.Context, string, contracthost.MachineID) error
+	reconfigureGuestIdentity func(context.Context, string, contracthost.MachineID, *contracthost.GuestConfig) error
 	readGuestSSHPublicKey    func(context.Context, string) (string, error)
 	syncGuestFilesystem      func(context.Context, string) error
 
