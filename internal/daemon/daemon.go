@@ -20,6 +20,7 @@ const (
 	defaultGuestKernelArgsNoPCI = defaultGuestKernelArgs + " pci=off"
 	defaultGuestMemoryMiB       = int64(3072)
 	defaultGuestVCPUs           = int64(2)
+	defaultGuestDiskSizeBytes   = int64(10 * 1024 * 1024 * 1024) // 10 GB
 	defaultSSHPort              = uint16(2222)
 	defaultVNCPort              = uint16(6080)
 	defaultCopyBufferSize       = 1024 * 1024
