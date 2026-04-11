@@ -141,3 +141,21 @@ func writeConfigFile(chrootRootDir string, spec MachineSpec, paths machinePaths,
 
 	return "/vm_config.json", nil
 }
+
+func writeMetadataFile(chrootRootDir string, spec MachineSpec) (string, error) {
+	if spec.MMDS == nil || spec.MMDS.Data == nil {
+		return "", nil
+	}
+
+	data, err := json.Marshal(spec.MMDS.Data)
+	if err != nil {
+		return "", fmt.Errorf("marshal mmds data: %w", err)
+	}
+
+	metadataPath := filepath.Join(chrootRootDir, "mmds.json")
+	if err := os.WriteFile(metadataPath, data, 0o644); err != nil {
+		return "", fmt.Errorf("write mmds data: %w", err)
+	}
+
+	return "/mmds.json", nil
+}

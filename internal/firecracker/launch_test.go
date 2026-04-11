@@ -26,7 +26,7 @@ func TestLaunchJailedFirecrackerPassesDaemonAndLoggingFlags(t *testing.T) {
 		t.Fatalf("create log dir: %v", err)
 	}
 
-	if _, err := launchJailedFirecracker(paths, "vm-1", "/usr/bin/firecracker", jailerPath, false, ""); err != nil {
+	if _, err := launchJailedFirecracker(paths, "vm-1", "/usr/bin/firecracker", jailerPath, false, "", ""); err != nil {
 		t.Fatalf("launch jailed firecracker: %v", err)
 	}
 
@@ -62,7 +62,7 @@ func TestLaunchJailedFirecrackerPassesEnablePCIWhenConfigured(t *testing.T) {
 		t.Fatalf("create log dir: %v", err)
 	}
 
-	if _, err := launchJailedFirecracker(paths, "vm-1", "/usr/bin/firecracker", jailerPath, true, ""); err != nil {
+	if _, err := launchJailedFirecracker(paths, "vm-1", "/usr/bin/firecracker", jailerPath, true, "", ""); err != nil {
 		t.Fatalf("launch jailed firecracker: %v", err)
 	}
 
