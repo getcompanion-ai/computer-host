@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	defaultGuestKernelArgs      = "console=ttyS0 reboot=k panic=1"
+	defaultGuestKernelArgs      = "console=ttyS0 reboot=k"
 	defaultGuestKernelArgsNoPCI = defaultGuestKernelArgs + " pci=off"
 	defaultGuestMemoryMiB       = int64(3072)
 	defaultGuestVCPUs           = int64(2)
@@ -25,6 +25,7 @@ const (
 	defaultVNCPort              = uint16(6080)
 	defaultCopyBufferSize       = 1024 * 1024
 	defaultGuestDialTimeout     = 500 * time.Millisecond
+	defaultGuestStopTimeout     = 10 * time.Second
 )
 
 type Runtime interface {

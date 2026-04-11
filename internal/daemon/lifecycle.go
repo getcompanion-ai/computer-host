@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -494,16 +495,19 @@ func (d *Daemon) deleteMachineRecord(ctx context.Context, record *model.MachineR
 }
 
 func (d *Daemon) stopMachineRecord(ctx context.Context, record *model.MachineRecord) error {
-	if record.Phase == contracthost.MachinePhaseRunning && strings.TrimSpace(record.RuntimeHost) != "" {
-		if err := d.syncGuestFilesystem(ctx, record.RuntimeHost); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: sync guest filesystem for %q failed before stop: %v\n", record.ID, err)
-		}
-	}
 	d.stopMachineRelays(record.ID)
 	d.stopPublishedPortsForMachine(record.ID)
-	if err := d.runtime.Delete(ctx, machineToRuntimeState(*record)); err != nil {
-		return err
+
+	cleanExit := false
+	if record.Phase == contracthost.MachinePhaseRunning && strings.TrimSpace(record.RuntimeHost) != "" {
+		cleanExit = d.shutdownGuestClean(ctx, record)
 	}
+	if !cleanExit {
+		if err := d.runtime.Delete(ctx, machineToRuntimeState(*record)); err != nil {
+			return err
+		}
+	}
+
 	record.Phase = contracthost.MachinePhaseStopped
 	record.Error = ""
 	record.PID = 0
@@ -512,6 +516,69 @@ func (d *Daemon) stopMachineRecord(ctx context.Context, record *model.MachineRec
 	record.TapDevice = ""
 	record.StartedAt = nil
 	return d.store.UpdateMachine(ctx, *record)
+}
+
+// shutdownGuestClean attempts an in-guest poweroff and waits for the
+// Firecracker process to exit within the stop timeout. Returns true if the
+// process exited cleanly, false if a forced teardown is needed.
+func (d *Daemon) shutdownGuestClean(ctx context.Context, record *model.MachineRecord) bool {
+	shutdownCtx, cancel := context.WithTimeout(ctx, defaultGuestStopTimeout)
+	defer cancel()
+
+	if err := d.issueGuestPoweroff(shutdownCtx, record.RuntimeHost); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: guest poweroff for %q failed: %v\n", record.ID, err)
+		return false
+	}
+
+	deadline := time.After(defaultGuestStopTimeout)
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline:
+			fmt.Fprintf(os.Stderr, "warning: guest %q did not exit within stop window; forcing teardown\n", record.ID)
+			return false
+		case <-ticker.C:
+			state, err := d.runtime.Inspect(machineToRuntimeState(*record))
+			if err != nil {
+				return false
+			}
+			if state.Phase != firecracker.PhaseRunning {
+				return true
+			}
+		}
+	}
+}
+
+func (d *Daemon) issueGuestPoweroff(ctx context.Context, runtimeHost string) error {
+	cmd := exec.CommandContext(
+		ctx,
+		"ssh",
+		"-i", d.backendSSHPrivateKeyPath(),
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "IdentitiesOnly=yes",
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=2",
+		"-p", fmt.Sprintf("%d", defaultSSHPort),
+		"node@"+runtimeHost,
+		"sudo poweroff",
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// poweroff may kill the SSH session before sending exit status;
+		// this is expected and not a real error.
+		if ctx.Err() == nil && strings.Contains(string(output), "closed by remote host") {
+			return nil
+		}
+		// Also treat exit status 255 (SSH disconnect) as success.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 255 {
+			return nil
+		}
+		return fmt.Errorf("issue guest poweroff: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func (d *Daemon) detachVolumesForMachine(ctx context.Context, machineID contracthost.MachineID) error {
