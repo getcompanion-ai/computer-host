@@ -498,14 +498,13 @@ func (d *Daemon) stopMachineRecord(ctx context.Context, record *model.MachineRec
 	d.stopMachineRelays(record.ID)
 	d.stopPublishedPortsForMachine(record.ID)
 
-	cleanExit := false
 	if record.Phase == contracthost.MachinePhaseRunning && strings.TrimSpace(record.RuntimeHost) != "" {
-		cleanExit = d.shutdownGuestClean(ctx, record)
+		d.shutdownGuestClean(ctx, record)
 	}
-	if !cleanExit {
-		if err := d.runtime.Delete(ctx, machineToRuntimeState(*record)); err != nil {
-			return err
-		}
+	// Always call runtime.Delete: it cleans up the TAP device, runtime
+	// directory, and process (no-op if the process already exited).
+	if err := d.runtime.Delete(ctx, machineToRuntimeState(*record)); err != nil {
+		return err
 	}
 
 	record.Phase = contracthost.MachinePhaseStopped
@@ -525,7 +524,7 @@ func (d *Daemon) shutdownGuestClean(ctx context.Context, record *model.MachineRe
 	shutdownCtx, cancel := context.WithTimeout(ctx, defaultGuestStopTimeout)
 	defer cancel()
 
-	if err := d.issueGuestPoweroff(shutdownCtx, record.RuntimeHost); err != nil {
+	if err := d.shutdownGuest(shutdownCtx, record.RuntimeHost); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: guest poweroff for %q failed: %v\n", record.ID, err)
 		return false
 	}

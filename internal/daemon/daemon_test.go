@@ -21,13 +21,14 @@ import (
 )
 
 type fakeRuntime struct {
-	bootState    firecracker.MachineState
-	bootCalls    int
-	restoreCalls int
-	deleteCalls  []firecracker.MachineState
-	lastSpec     firecracker.MachineSpec
-	lastLoadSpec firecracker.SnapshotLoadSpec
-	mmdsWrites   []any
+	bootState       firecracker.MachineState
+	bootCalls       int
+	restoreCalls    int
+	deleteCalls     []firecracker.MachineState
+	lastSpec        firecracker.MachineSpec
+	lastLoadSpec    firecracker.SnapshotLoadSpec
+	mmdsWrites      []any
+	inspectOverride func(firecracker.MachineState) (*firecracker.MachineState, error)
 }
 
 func (f *fakeRuntime) Boot(_ context.Context, spec firecracker.MachineSpec, _ []firecracker.NetworkAllocation) (*firecracker.MachineState, error) {
@@ -38,6 +39,9 @@ func (f *fakeRuntime) Boot(_ context.Context, spec firecracker.MachineSpec, _ []
 }
 
 func (f *fakeRuntime) Inspect(state firecracker.MachineState) (*firecracker.MachineState, error) {
+	if f.inspectOverride != nil {
+		return f.inspectOverride(state)
+	}
 	copy := state
 	return &copy, nil
 }
@@ -256,9 +260,15 @@ func TestStopMachineSyncsGuestFilesystemBeforeDelete(t *testing.T) {
 		t.Fatalf("create daemon: %v", err)
 	}
 
-	var syncedHost string
-	hostDaemon.syncGuestFilesystem = func(_ context.Context, runtimeHost string) error {
-		syncedHost = runtimeHost
+	var shutdownHost string
+	hostDaemon.shutdownGuest = func(_ context.Context, runtimeHost string) error {
+		shutdownHost = runtimeHost
+		// Simulate the VM exiting after poweroff by making Inspect return stopped.
+		runtime.inspectOverride = func(state firecracker.MachineState) (*firecracker.MachineState, error) {
+			state.Phase = firecracker.PhaseStopped
+			state.PID = 0
+			return &state, nil
+		}
 		return nil
 	}
 
@@ -282,9 +292,10 @@ func TestStopMachineSyncsGuestFilesystemBeforeDelete(t *testing.T) {
 		t.Fatalf("stop machine: %v", err)
 	}
 
-	if syncedHost != "172.16.0.2" {
-		t.Fatalf("sync host mismatch: got %q want %q", syncedHost, "172.16.0.2")
+	if shutdownHost != "172.16.0.2" {
+		t.Fatalf("shutdown host mismatch: got %q want %q", shutdownHost, "172.16.0.2")
 	}
+	// runtime.Delete is always called to clean up TAP device and runtime dir.
 	if len(runtime.deleteCalls) != 1 {
 		t.Fatalf("runtime delete call count mismatch: got %d want 1", len(runtime.deleteCalls))
 	}

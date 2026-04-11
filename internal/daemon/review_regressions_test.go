@@ -608,8 +608,8 @@ func TestStopMachineContinuesWhenGuestSyncFails(t *testing.T) {
 		t.Fatalf("create daemon: %v", err)
 	}
 	stubGuestSSHPublicKeyReader(hostDaemon)
-	hostDaemon.syncGuestFilesystem = func(context.Context, string) error {
-		return errors.New("guest sync failed")
+	hostDaemon.shutdownGuest = func(context.Context, string) error {
+		return errors.New("guest shutdown failed")
 	}
 
 	now := time.Now().UTC()
