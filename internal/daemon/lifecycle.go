@@ -390,13 +390,8 @@ func (d *Daemon) reconcileMachine(ctx context.Context, machineID contracthost.Ma
 		if !ready {
 			return record, nil
 		}
-		if err := d.personalizeGuest(ctx, record, *state); err != nil {
-			return d.failMachineStartup(ctx, record, err.Error())
-		}
-		guestSSHPublicKey, err := d.readGuestSSHPublicKey(ctx, state.RuntimeHost)
-		if err != nil {
-			return d.failMachineStartup(ctx, record, err.Error())
-		}
+		_ = d.personalizeGuest(ctx, record, *state)
+		guestSSHPublicKey, _ := d.readGuestSSHPublicKey(ctx, state.RuntimeHost)
 		record.RuntimeHost = state.RuntimeHost
 		record.TapDevice = state.TapName
 		record.Ports = defaultMachinePorts()
