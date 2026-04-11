@@ -32,11 +32,7 @@ func (d *Daemon) ListMachines(ctx context.Context) (*contracthost.ListMachinesRe
 
 	machines := make([]contracthost.Machine, 0, len(records))
 	for _, record := range records {
-		reconciled, err := d.reconcileMachine(ctx, record.ID)
-		if err != nil {
-			return nil, err
-		}
-		machines = append(machines, machineToContract(*reconciled))
+		machines = append(machines, machineToContract(record))
 	}
 	return &contracthost.ListMachinesResponse{Machines: machines}, nil
 }
