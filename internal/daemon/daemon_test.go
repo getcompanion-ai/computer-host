@@ -236,6 +236,23 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	if machine.GuestConfig == nil || len(machine.GuestConfig.AuthorizedKeys) == 0 {
 		t.Fatalf("stored guest config missing authorized keys: %#v", machine.GuestConfig)
 	}
+	machineName, err := readExt4File(runtime.lastSpec.RootFSPath, "/etc/microagent/machine-name")
+	if err != nil {
+		t.Fatalf("read injected machine-name: %v", err)
+	}
+	if machineName != "vm-1\n" {
+		t.Fatalf("machine-name mismatch: got %q want %q", machineName, "vm-1\n")
+	}
+	injectedAuthorizedKeys, err := readExt4File(runtime.lastSpec.RootFSPath, "/etc/microagent/authorized_keys")
+	if err != nil {
+		t.Fatalf("read injected authorized_keys: %v", err)
+	}
+	if !strings.Contains(injectedAuthorizedKeys, strings.TrimSpace(string(hostAuthorizedKeyBytes))) {
+		t.Fatalf("disk authorized_keys missing backend ssh key: %q", injectedAuthorizedKeys)
+	}
+	if !strings.Contains(injectedAuthorizedKeys, "daemon-test") {
+		t.Fatalf("disk authorized_keys missing request override key: %q", injectedAuthorizedKeys)
+	}
 
 	operations, err := fileStore.ListOperations(context.Background())
 	if err != nil {
@@ -260,6 +277,11 @@ func TestStopMachineSyncsGuestFilesystemBeforeDelete(t *testing.T) {
 		t.Fatalf("create daemon: %v", err)
 	}
 
+	var syncedHost string
+	hostDaemon.syncGuestFilesystem = func(_ context.Context, runtimeHost string) error {
+		syncedHost = runtimeHost
+		return nil
+	}
 	var shutdownHost string
 	hostDaemon.shutdownGuest = func(_ context.Context, runtimeHost string) error {
 		shutdownHost = runtimeHost
@@ -294,6 +316,9 @@ func TestStopMachineSyncsGuestFilesystemBeforeDelete(t *testing.T) {
 
 	if shutdownHost != "172.16.0.2" {
 		t.Fatalf("shutdown host mismatch: got %q want %q", shutdownHost, "172.16.0.2")
+	}
+	if syncedHost != "172.16.0.2" {
+		t.Fatalf("sync host mismatch: got %q want %q", syncedHost, "172.16.0.2")
 	}
 	// runtime.Delete is always called to clean up TAP device and runtime dir.
 	if len(runtime.deleteCalls) != 1 {
@@ -361,6 +386,10 @@ func TestReconcileStartingMachinePersonalizesBeforeRunning(t *testing.T) {
 		t.Fatalf("create machine: %v", err)
 	}
 
+	if err := hostDaemon.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+
 	response, err := hostDaemon.GetMachine(context.Background(), "vm-starting")
 	if err != nil {
 		t.Fatalf("GetMachine returned error: %v", err)
@@ -373,6 +402,116 @@ func TestReconcileStartingMachinePersonalizesBeforeRunning(t *testing.T) {
 	}
 	if response.Machine.GuestSSHPublicKey == "" {
 		t.Fatalf("guest ssh public key should be recorded after convergence")
+	}
+}
+
+func TestListMachinesDoesNotReconcileStartingMachines(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	hostDaemon, err := New(cfg, fileStore, &fakeRuntime{})
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	hostDaemon.personalizeGuest = func(context.Context, *model.MachineRecord, firecracker.MachineState) error {
+		t.Fatalf("ListMachines should not reconcile guest personalization")
+		return nil
+	}
+	hostDaemon.readGuestSSHPublicKey = func(context.Context, string) (string, error) {
+		t.Fatalf("ListMachines should not read guest ssh public key")
+		return "", nil
+	}
+
+	now := time.Now().UTC()
+	if err := fileStore.CreateMachine(context.Background(), model.MachineRecord{
+		ID:             "vm-list",
+		SystemVolumeID: "vm-list-system",
+		RuntimeHost:    "127.0.0.1",
+		TapDevice:      "fctap-list",
+		Ports:          defaultMachinePorts(),
+		Phase:          contracthost.MachinePhaseStarting,
+		PID:            4321,
+		SocketPath:     filepath.Join(cfg.RuntimeDir, "machines", "vm-list", "root", "run", "firecracker.sock"),
+		CreatedAt:      now,
+		StartedAt:      &now,
+	}); err != nil {
+		t.Fatalf("create machine: %v", err)
+	}
+
+	response, err := hostDaemon.ListMachines(context.Background())
+	if err != nil {
+		t.Fatalf("ListMachines returned error: %v", err)
+	}
+	if len(response.Machines) != 1 {
+		t.Fatalf("machine count = %d, want 1", len(response.Machines))
+	}
+	if response.Machines[0].Phase != contracthost.MachinePhaseStarting {
+		t.Fatalf("machine phase = %q, want %q", response.Machines[0].Phase, contracthost.MachinePhaseStarting)
+	}
+}
+
+func TestReconcileStartingMachineIgnoresPersonalizationFailures(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	sshListener := listenTestPort(t, int(defaultSSHPort))
+	defer func() { _ = sshListener.Close() }()
+	vncListener := listenTestPort(t, int(defaultVNCPort))
+	defer func() { _ = vncListener.Close() }()
+
+	startedAt := time.Unix(1700000201, 0).UTC()
+	runtime := &fakeRuntime{}
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	hostDaemon.personalizeGuest = func(context.Context, *model.MachineRecord, firecracker.MachineState) error {
+		return errors.New("vsock EOF")
+	}
+	hostDaemon.readGuestSSHPublicKey = func(context.Context, string) (string, error) {
+		return "", errors.New("Permission denied")
+	}
+
+	if err := fileStore.CreateMachine(context.Background(), model.MachineRecord{
+		ID:                "vm-best-effort",
+		SystemVolumeID:    "vm-best-effort-system",
+		RuntimeHost:       "127.0.0.1",
+		TapDevice:         "fctap-best-effort",
+		Ports:             defaultMachinePorts(),
+		GuestSSHPublicKey: "ssh-ed25519 AAAAExistingHostKey",
+		Phase:             contracthost.MachinePhaseStarting,
+		PID:               4322,
+		SocketPath:        filepath.Join(cfg.RuntimeDir, "machines", "vm-best-effort", "root", "run", "firecracker.sock"),
+		CreatedAt:         time.Now().UTC(),
+		StartedAt:         &startedAt,
+	}); err != nil {
+		t.Fatalf("create machine: %v", err)
+	}
+
+	if err := hostDaemon.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+
+	record, err := fileStore.GetMachine(context.Background(), "vm-best-effort")
+	if err != nil {
+		t.Fatalf("get machine: %v", err)
+	}
+	if record.Phase != contracthost.MachinePhaseRunning {
+		t.Fatalf("machine phase = %q, want %q", record.Phase, contracthost.MachinePhaseRunning)
+	}
+	if record.GuestSSHPublicKey != "ssh-ed25519 AAAAExistingHostKey" {
+		t.Fatalf("guest ssh public key = %q, want preserved value", record.GuestSSHPublicKey)
+	}
+	if len(runtime.deleteCalls) != 0 {
+		t.Fatalf("runtime delete calls = %d, want 0", len(runtime.deleteCalls))
 	}
 }
 
@@ -436,7 +575,7 @@ func TestRestoreSnapshotFallsBackToLocalSnapshotNetwork(t *testing.T) {
 	server := newRestoreArtifactServer(t, map[string][]byte{
 		"/kernel": []byte("kernel"),
 		"/rootfs": []byte("rootfs"),
-		"/system": []byte("disk"),
+		"/system": buildTestExt4ImageBytes(t),
 	})
 	defer server.Close()
 
@@ -582,7 +721,7 @@ func TestRestoreSnapshotUsesLocalSnapshotArtifacts(t *testing.T) {
 		t.Fatalf("create snapshot dir: %v", err)
 	}
 	systemPath := filepath.Join(snapshotDir, "system.img")
-	if err := os.WriteFile(systemPath, []byte("disk"), 0o644); err != nil {
+	if err := os.WriteFile(systemPath, buildTestExt4ImageBytes(t), 0o644); err != nil {
 		t.Fatalf("write system disk: %v", err)
 	}
 	if err := fileStore.CreateSnapshot(context.Background(), model.SnapshotRecord{
@@ -619,6 +758,13 @@ func TestRestoreSnapshotUsesLocalSnapshotArtifacts(t *testing.T) {
 	}
 	if runtime.restoreCalls != 0 {
 		t.Fatalf("restore boot call count mismatch: got %d want 0", runtime.restoreCalls)
+	}
+	machineName, err := readExt4File(runtime.lastSpec.RootFSPath, "/etc/microagent/machine-name")
+	if err != nil {
+		t.Fatalf("read restored machine-name: %v", err)
+	}
+	if machineName != "restored-local\n" {
+		t.Fatalf("restored machine-name mismatch: got %q want %q", machineName, "restored-local\n")
 	}
 }
 
@@ -713,7 +859,7 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 	server := newRestoreArtifactServer(t, map[string][]byte{
 		"/kernel": []byte("kernel"),
 		"/rootfs": []byte("rootfs"),
-		"/system": []byte("disk"),
+		"/system": buildTestExt4ImageBytes(t),
 		"/user-0": []byte("user-disk"),
 	})
 	defer server.Close()
@@ -820,7 +966,7 @@ func TestRestoreSnapshotBootsWithFreshNetworkWhenSourceNetworkInUseOnHost(t *tes
 	server := newRestoreArtifactServer(t, map[string][]byte{
 		"/kernel": []byte("kernel"),
 		"/rootfs": []byte("rootfs"),
-		"/system": []byte("disk"),
+		"/system": buildTestExt4ImageBytes(t),
 	})
 	defer server.Close()
 
@@ -946,9 +1092,25 @@ func testConfig(root string) appconfig.Config {
 		DriveIOEngine:         firecracker.DriveIOEngineSync,
 		SocketPath:            filepath.Join(root, "firecracker-host.sock"),
 		EgressInterface:       "eth0",
+		ReconcileInterval:     time.Second,
 		FirecrackerBinaryPath: "/usr/bin/firecracker",
 		JailerBinaryPath:      "/usr/bin/jailer",
 	}
+}
+
+func buildTestExt4ImageBytes(t *testing.T) []byte {
+	t.Helper()
+
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "rootfs.ext4")
+	if err := buildTestExt4Image(root, imagePath); err != nil {
+		t.Fatalf("build ext4 image: %v", err)
+	}
+	payload, err := os.ReadFile(imagePath)
+	if err != nil {
+		t.Fatalf("read ext4 image: %v", err)
+	}
+	return payload
 }
 
 func TestGuestKernelArgsDisablesPCIByDefault(t *testing.T) {

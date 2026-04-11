@@ -72,6 +72,12 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	if err := os.Truncate(systemVolumePath, defaultGuestDiskSizeBytes); err != nil {
 		return nil, fmt.Errorf("expand system volume for %q: %w", req.MachineID, err)
 	}
+	if err := injectMachineIdentity(ctx, systemVolumePath, req.MachineID); err != nil {
+		return nil, fmt.Errorf("inject machine identity for %q: %w", req.MachineID, err)
+	}
+	if err := injectGuestConfig(ctx, systemVolumePath, guestConfig); err != nil {
+		return nil, fmt.Errorf("inject guest config for %q: %w", req.MachineID, err)
+	}
 	removeSystemVolumeOnFailure := true
 	defer func() {
 		if !removeSystemVolumeOnFailure {

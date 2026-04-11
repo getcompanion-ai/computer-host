@@ -17,7 +17,7 @@ import (
 )
 
 func (d *Daemon) GetMachine(ctx context.Context, id contracthost.MachineID) (*contracthost.GetMachineResponse, error) {
-	record, err := d.reconcileMachine(ctx, id)
+	record, err := d.store.GetMachine(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -32,11 +32,7 @@ func (d *Daemon) ListMachines(ctx context.Context) (*contracthost.ListMachinesRe
 
 	machines := make([]contracthost.Machine, 0, len(records))
 	for _, record := range records {
-		reconciled, err := d.reconcileMachine(ctx, record.ID)
-		if err != nil {
-			return nil, err
-		}
-		machines = append(machines, machineToContract(*reconciled))
+		machines = append(machines, machineToContract(record))
 	}
 	return &contracthost.ListMachinesResponse{Machines: machines}, nil
 }
@@ -391,11 +387,12 @@ func (d *Daemon) reconcileMachine(ctx context.Context, machineID contracthost.Ma
 			return record, nil
 		}
 		if err := d.personalizeGuest(ctx, record, *state); err != nil {
-			return d.failMachineStartup(ctx, record, err.Error())
+			fmt.Fprintf(os.Stderr, "warning: guest personalization for %q failed: %v\n", record.ID, err)
 		}
 		guestSSHPublicKey, err := d.readGuestSSHPublicKey(ctx, state.RuntimeHost)
 		if err != nil {
-			return d.failMachineStartup(ctx, record, err.Error())
+			fmt.Fprintf(os.Stderr, "warning: read guest ssh public key for %q failed: %v\n", record.ID, err)
+			guestSSHPublicKey = record.GuestSSHPublicKey
 		}
 		record.RuntimeHost = state.RuntimeHost
 		record.TapDevice = state.TapName
@@ -501,6 +498,9 @@ func (d *Daemon) stopMachineRecord(ctx context.Context, record *model.MachineRec
 	d.stopPublishedPortsForMachine(record.ID)
 
 	if record.Phase == contracthost.MachinePhaseRunning && strings.TrimSpace(record.RuntimeHost) != "" {
+		if err := d.syncGuestFilesystem(ctx, record.RuntimeHost); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: guest filesystem sync for %q failed: %v\n", record.ID, err)
+		}
 		d.shutdownGuestClean(ctx, record)
 	}
 	// Always call runtime.Delete: it cleans up the TAP device, runtime

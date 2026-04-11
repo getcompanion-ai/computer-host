@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -99,6 +100,21 @@ func main() {
 			_ = server.Shutdown(context.Background())
 		}
 		return nil
+	})
+	group.Go(func() error {
+		ticker := time.NewTicker(cfg.ReconcileInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-groupCtx.Done():
+				return nil
+			case <-ticker.C:
+				if err := hostDaemon.Reconcile(groupCtx); err != nil && groupCtx.Err() == nil {
+					fmt.Fprintf(os.Stderr, "warning: firecracker-host reconcile failed: %v\n", err)
+				}
+			}
+		}
 	})
 
 	if err := group.Wait(); err != nil {

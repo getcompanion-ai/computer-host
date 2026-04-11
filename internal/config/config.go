@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 )
@@ -27,6 +28,7 @@ type Config struct {
 	SocketPath            string
 	HTTPAddr              string
 	EgressInterface       string
+	ReconcileInterval     time.Duration
 	FirecrackerBinaryPath string
 	JailerBinaryPath      string
 	GuestLoginCAPublicKey string
@@ -66,6 +68,10 @@ func Load() (Config, error) {
 		FirecrackerBinaryPath: strings.TrimSpace(os.Getenv("FIRECRACKER_BINARY_PATH")),
 		JailerBinaryPath:      strings.TrimSpace(os.Getenv("JAILER_BINARY_PATH")),
 		GuestLoginCAPublicKey: strings.TrimSpace(os.Getenv("GUEST_LOGIN_CA_PUBLIC_KEY")),
+	}
+	cfg.ReconcileInterval, err = durationDefault("FIRECRACKER_HOST_RECONCILE_INTERVAL", 5*time.Second)
+	if err != nil {
+		return Config{}, err
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -113,6 +119,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.EgressInterface) == "" {
 		return fmt.Errorf("FIRECRACKER_HOST_EGRESS_INTERFACE is required")
+	}
+	if c.ReconcileInterval <= 0 {
+		return fmt.Errorf("FIRECRACKER_HOST_RECONCILE_INTERVAL must be greater than zero")
 	}
 	return nil
 }
@@ -171,6 +180,18 @@ func loadBool(name string) (bool, error) {
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {
 		return false, fmt.Errorf("%s must be a boolean: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func durationDefault(name string, fallback time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a duration: %w", name, err)
 	}
 	return parsed, nil
 }

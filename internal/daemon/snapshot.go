@@ -265,6 +265,14 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		clearOperation = true
 		return nil, fmt.Errorf("copy system disk for restore: %w", err)
 	}
+	if err := injectMachineIdentity(ctx, newSystemDiskPath, req.MachineID); err != nil {
+		clearOperation = true
+		return nil, fmt.Errorf("inject machine identity for restore: %w", err)
+	}
+	if err := injectGuestConfig(ctx, newSystemDiskPath, guestConfig); err != nil {
+		clearOperation = true
+		return nil, fmt.Errorf("inject guest config for restore: %w", err)
+	}
 
 	type restoredUserVolume struct {
 		ID      contracthost.VolumeID

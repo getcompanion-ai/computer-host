@@ -468,8 +468,9 @@ func TestRestoreSnapshotTransitionsToStartingWithoutRelayAllocation(t *testing.T
 	if err := os.MkdirAll(snapDir, 0o755); err != nil {
 		t.Fatalf("create snapshot dir: %v", err)
 	}
+	systemDisk := buildTestExt4ImageBytes(t)
 	snapDisk := filepath.Join(snapDir, "system.img")
-	if err := os.WriteFile(snapDisk, []byte("disk"), 0o644); err != nil {
+	if err := os.WriteFile(snapDisk, systemDisk, 0o644); err != nil {
 		t.Fatalf("write snapshot disk: %v", err)
 	}
 	if err := baseStore.CreateSnapshot(context.Background(), model.SnapshotRecord{
@@ -487,7 +488,7 @@ func TestRestoreSnapshotTransitionsToStartingWithoutRelayAllocation(t *testing.T
 	server := newRestoreArtifactServer(t, map[string][]byte{
 		"/kernel": []byte("kernel"),
 		"/rootfs": []byte("rootfs"),
-		"/system": []byte("disk"),
+		"/system": systemDisk,
 	})
 	defer server.Close()
 
@@ -594,8 +595,16 @@ func TestStopMachineContinuesWhenGuestSyncFails(t *testing.T) {
 		t.Fatalf("create daemon: %v", err)
 	}
 	stubGuestSSHPublicKeyReader(hostDaemon)
+	hostDaemon.syncGuestFilesystem = func(context.Context, string) error {
+		return errors.New("guest sync failed")
+	}
 	hostDaemon.shutdownGuest = func(context.Context, string) error {
-		return errors.New("guest shutdown failed")
+		runtime.inspectOverride = func(state firecracker.MachineState) (*firecracker.MachineState, error) {
+			state.Phase = firecracker.PhaseStopped
+			state.PID = 0
+			return &state, nil
+		}
+		return nil
 	}
 
 	now := time.Now().UTC()
@@ -678,11 +687,12 @@ func TestRestoreSnapshotCleansStagingArtifactsAfterSuccess(t *testing.T) {
 	}
 	stubGuestSSHPublicKeyReader(hostDaemon)
 	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID, *contracthost.GuestConfig) error { return nil }
+	systemDisk := buildTestExt4ImageBytes(t)
 
 	server := newRestoreArtifactServer(t, map[string][]byte{
 		"/kernel": []byte("kernel"),
 		"/rootfs": []byte("rootfs"),
-		"/system": []byte("disk"),
+		"/system": systemDisk,
 	})
 	defer server.Close()
 
@@ -699,7 +709,7 @@ func TestRestoreSnapshotCleansStagingArtifactsAfterSuccess(t *testing.T) {
 			SourceRuntimeHost: "172.16.0.2",
 			SourceTapDevice:   "fctap0",
 			Artifacts: []contracthost.SnapshotArtifact{
-				{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", DownloadURL: server.URL + "/system", SHA256Hex: mustSHA256Hex(t, []byte("disk"))},
+				{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", DownloadURL: server.URL + "/system", SHA256Hex: mustSHA256Hex(t, systemDisk)},
 			},
 		},
 	})
@@ -727,11 +737,12 @@ func TestRestoreSnapshotCleansStagingArtifactsAfterDownloadFailure(t *testing.T)
 		t.Fatalf("create daemon: %v", err)
 	}
 	stubGuestSSHPublicKeyReader(hostDaemon)
+	systemDisk := buildTestExt4ImageBytes(t)
 
 	server := newRestoreArtifactServer(t, map[string][]byte{
 		"/kernel": []byte("kernel"),
 		"/rootfs": []byte("rootfs"),
-		"/system": []byte("disk"),
+		"/system": systemDisk,
 	})
 	defer server.Close()
 
