@@ -87,6 +87,8 @@ func (d *Daemon) StartMachine(ctx context.Context, id contracthost.MachineID) (*
 	if err != nil {
 		return nil, err
 	}
+	repairDirtyFilesystem(systemVolume.Path)
+
 	spec, err := d.buildMachineSpec(id, artifact, userVolumes, systemVolume.Path, record.GuestConfig)
 	if err != nil {
 		return nil, err
