@@ -434,11 +434,9 @@ func TestRestoreSnapshotFallsBackToLocalSnapshotNetwork(t *testing.T) {
 	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID, *contracthost.GuestConfig) error { return nil }
 
 	server := newRestoreArtifactServer(t, map[string][]byte{
-		"/kernel":  []byte("kernel"),
-		"/rootfs":  []byte("rootfs"),
-		"/memory":  []byte("mem"),
-		"/vmstate": []byte("state"),
-		"/system":  []byte("disk"),
+		"/kernel": []byte("kernel"),
+		"/rootfs": []byte("rootfs"),
+		"/system": []byte("disk"),
 	})
 	defer server.Close()
 
@@ -465,8 +463,6 @@ func TestRestoreSnapshotFallsBackToLocalSnapshotNetwork(t *testing.T) {
 		ID:                "snap1",
 		MachineID:         "source",
 		Artifact:          artifactRef,
-		MemFilePath:       filepath.Join(root, "snapshots", "snap1", "memory.bin"),
-		StateFilePath:     filepath.Join(root, "snapshots", "snap1", "vmstate.bin"),
 		DiskPaths:         []string{filepath.Join(root, "snapshots", "snap1", "system.img")},
 		SourceRuntimeHost: "172.16.0.2",
 		SourceTapDevice:   "fctap0",
@@ -486,8 +482,6 @@ func TestRestoreSnapshotFallsBackToLocalSnapshotNetwork(t *testing.T) {
 			MachineID:  "source",
 			ImageID:    "image-1",
 			Artifacts: []contracthost.SnapshotArtifact{
-				{ID: "memory", Kind: contracthost.SnapshotArtifactKindMemory, Name: "memory.bin", DownloadURL: server.URL + "/memory"},
-				{ID: "vmstate", Kind: contracthost.SnapshotArtifactKindVMState, Name: "vmstate.bin", DownloadURL: server.URL + "/vmstate"},
 				{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", DownloadURL: server.URL + "/system"},
 			},
 		},
@@ -502,17 +496,11 @@ func TestRestoreSnapshotFallsBackToLocalSnapshotNetwork(t *testing.T) {
 	if response.Machine.Phase != contracthost.MachinePhaseStarting {
 		t.Fatalf("restored machine phase mismatch: got %q", response.Machine.Phase)
 	}
-	if runtime.restoreCalls != 1 {
-		t.Fatalf("restore boot call count mismatch: got %d want 1", runtime.restoreCalls)
+	if runtime.bootCalls != 1 {
+		t.Fatalf("boot call count mismatch: got %d want 1", runtime.bootCalls)
 	}
-	if runtime.lastLoadSpec.Network == nil {
-		t.Fatalf("restore boot should preserve snapshot network")
-	}
-	if got := runtime.lastLoadSpec.Network.GuestIP().String(); got != "172.16.0.2" {
-		t.Fatalf("restore guest ip mismatch: got %q want %q", got, "172.16.0.2")
-	}
-	if got := runtime.lastLoadSpec.Network.TapName; got != "fctap0" {
-		t.Fatalf("restore tap mismatch: got %q want %q", got, "fctap0")
+	if runtime.restoreCalls != 0 {
+		t.Fatalf("restore boot call count mismatch: got %d want 0", runtime.restoreCalls)
 	}
 
 	ops, err := fileStore.ListOperations(context.Background())
@@ -593,28 +581,16 @@ func TestRestoreSnapshotUsesLocalSnapshotArtifacts(t *testing.T) {
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		t.Fatalf("create snapshot dir: %v", err)
 	}
-	memoryPath := filepath.Join(snapshotDir, "memory.bin")
-	vmstatePath := filepath.Join(snapshotDir, "vmstate.bin")
 	systemPath := filepath.Join(snapshotDir, "system.img")
-	if err := os.WriteFile(memoryPath, []byte("mem"), 0o644); err != nil {
-		t.Fatalf("write memory: %v", err)
-	}
-	if err := os.WriteFile(vmstatePath, []byte("state"), 0o644); err != nil {
-		t.Fatalf("write vmstate: %v", err)
-	}
 	if err := os.WriteFile(systemPath, []byte("disk"), 0o644); err != nil {
 		t.Fatalf("write system disk: %v", err)
 	}
 	if err := fileStore.CreateSnapshot(context.Background(), model.SnapshotRecord{
-		ID:            "snap-local",
-		MachineID:     "source",
-		Artifact:      artifactRef,
-		MemFilePath:   memoryPath,
-		StateFilePath: vmstatePath,
-		DiskPaths:     []string{systemPath},
+		ID:        "snap-local",
+		MachineID: "source",
+		Artifact:  artifactRef,
+		DiskPaths: []string{systemPath},
 		Artifacts: []model.SnapshotArtifactRecord{
-			{ID: "memory", Kind: contracthost.SnapshotArtifactKindMemory, Name: "memory.bin", LocalPath: memoryPath, SizeBytes: 3},
-			{ID: "vmstate", Kind: contracthost.SnapshotArtifactKindVMState, Name: "vmstate.bin", LocalPath: vmstatePath, SizeBytes: 5},
 			{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", LocalPath: systemPath, SizeBytes: 4},
 		},
 		SourceRuntimeHost: "172.16.0.2",
@@ -638,17 +614,11 @@ func TestRestoreSnapshotUsesLocalSnapshotArtifacts(t *testing.T) {
 	if response.Machine.ID != "restored-local" {
 		t.Fatalf("restored machine id mismatch: got %q", response.Machine.ID)
 	}
-	if runtime.restoreCalls != 1 {
-		t.Fatalf("restore boot call count mismatch: got %d want 1", runtime.restoreCalls)
+	if runtime.bootCalls != 1 {
+		t.Fatalf("boot call count mismatch: got %d want 1", runtime.bootCalls)
 	}
-	if runtime.lastLoadSpec.Network == nil {
-		t.Fatalf("restore boot should preserve local snapshot network")
-	}
-	if got := runtime.lastLoadSpec.Network.GuestIP().String(); got != "172.16.0.2" {
-		t.Fatalf("restore guest ip mismatch: got %q want %q", got, "172.16.0.2")
-	}
-	if got := runtime.lastLoadSpec.Network.TapName; got != "fctap0" {
-		t.Fatalf("restore tap mismatch: got %q want %q", got, "fctap0")
+	if runtime.restoreCalls != 0 {
+		t.Fatalf("restore boot call count mismatch: got %d want 0", runtime.restoreCalls)
 	}
 }
 
@@ -741,12 +711,10 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 	}
 
 	server := newRestoreArtifactServer(t, map[string][]byte{
-		"/kernel":  []byte("kernel"),
-		"/rootfs":  []byte("rootfs"),
-		"/memory":  []byte("mem"),
-		"/vmstate": []byte("state"),
-		"/system":  []byte("disk"),
-		"/user-0":  []byte("user-disk"),
+		"/kernel": []byte("kernel"),
+		"/rootfs": []byte("rootfs"),
+		"/system": []byte("disk"),
+		"/user-0": []byte("user-disk"),
 	})
 	defer server.Close()
 
@@ -763,8 +731,6 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 			SourceRuntimeHost: "172.16.0.2",
 			SourceTapDevice:   "fctap0",
 			Artifacts: []contracthost.SnapshotArtifact{
-				{ID: "memory", Kind: contracthost.SnapshotArtifactKindMemory, Name: "memory.bin", DownloadURL: server.URL + "/memory"},
-				{ID: "vmstate", Kind: contracthost.SnapshotArtifactKindVMState, Name: "vmstate.bin", DownloadURL: server.URL + "/vmstate"},
 				{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", DownloadURL: server.URL + "/system"},
 				{ID: "disk-user-0", Kind: contracthost.SnapshotArtifactKindDisk, Name: "user-0.img", DownloadURL: server.URL + "/user-0"},
 			},
@@ -780,23 +746,17 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 	if response.Machine.Phase != contracthost.MachinePhaseStarting {
 		t.Fatalf("restored machine phase mismatch: got %q", response.Machine.Phase)
 	}
-	if runtime.restoreCalls != 1 {
-		t.Fatalf("restore boot call count mismatch: got %d want 1", runtime.restoreCalls)
+	if runtime.bootCalls != 1 {
+		t.Fatalf("boot call count mismatch: got %d want 1", runtime.bootCalls)
 	}
-	if runtime.lastLoadSpec.Network == nil {
-		t.Fatalf("restore boot should preserve durable snapshot network")
+	if runtime.restoreCalls != 0 {
+		t.Fatalf("restore boot call count mismatch: got %d want 0", runtime.restoreCalls)
 	}
-	if got := runtime.lastLoadSpec.Network.GuestIP().String(); got != "172.16.0.2" {
-		t.Fatalf("restore guest ip mismatch: got %q want %q", got, "172.16.0.2")
-	}
-	if got := runtime.lastLoadSpec.Network.TapName; got != "fctap0" {
-		t.Fatalf("restore tap mismatch: got %q want %q", got, "fctap0")
-	}
-	if !strings.Contains(runtime.lastLoadSpec.KernelImagePath, filepath.Join("artifacts", artifactKey(contracthost.ArtifactRef{
+	if !strings.Contains(runtime.lastSpec.KernelImagePath, filepath.Join("artifacts", artifactKey(contracthost.ArtifactRef{
 		KernelImageURL: server.URL + "/kernel",
 		RootFSURL:      server.URL + "/rootfs",
 	}), "kernel")) {
-		t.Fatalf("restore boot kernel path mismatch: got %q", runtime.lastLoadSpec.KernelImagePath)
+		t.Fatalf("restore boot kernel path mismatch: got %q", runtime.lastSpec.KernelImagePath)
 	}
 
 	machine, err := fileStore.GetMachine(context.Background(), "restored")
@@ -825,7 +785,7 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 	}
 }
 
-func TestRestoreSnapshotRejectsWhenRestoreNetworkInUseOnHost(t *testing.T) {
+func TestRestoreSnapshotBootsWithFreshNetworkWhenSourceNetworkInUseOnHost(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
 	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
@@ -838,6 +798,31 @@ func TestRestoreSnapshotRejectsWhenRestoreNetworkInUseOnHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
+	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID, *contracthost.GuestConfig) error { return nil }
+
+	sshListener := listenTestPort(t, int(defaultSSHPort))
+	defer func() { _ = sshListener.Close() }()
+	vncListener := listenTestPort(t, int(defaultVNCPort))
+	defer func() { _ = vncListener.Close() }()
+
+	startedAt := time.Unix(1700000299, 0).UTC()
+	runtime.bootState = firecracker.MachineState{
+		ID:          "restored",
+		Phase:       firecracker.PhaseRunning,
+		PID:         1234,
+		RuntimeHost: "127.0.0.1",
+		SocketPath:  filepath.Join(cfg.RuntimeDir, "machines", "restored", "root", "run", "firecracker.sock"),
+		TapName:     "fctap9",
+		StartedAt:   &startedAt,
+	}
+
+	server := newRestoreArtifactServer(t, map[string][]byte{
+		"/kernel": []byte("kernel"),
+		"/rootfs": []byte("rootfs"),
+		"/system": []byte("disk"),
+	})
+	defer server.Close()
 
 	if err := fileStore.CreateMachine(context.Background(), model.MachineRecord{
 		ID:             "source",
@@ -851,11 +836,11 @@ func TestRestoreSnapshotRejectsWhenRestoreNetworkInUseOnHost(t *testing.T) {
 		t.Fatalf("create running source machine: %v", err)
 	}
 
-	_, err = hostDaemon.RestoreSnapshot(context.Background(), "snap1", contracthost.RestoreSnapshotRequest{
+	response, err := hostDaemon.RestoreSnapshot(context.Background(), "snap1", contracthost.RestoreSnapshotRequest{
 		MachineID: "restored",
 		Artifact: contracthost.ArtifactRef{
-			KernelImageURL: "https://example.com/kernel",
-			RootFSURL:      "https://example.com/rootfs",
+			KernelImageURL: server.URL + "/kernel",
+			RootFSURL:      server.URL + "/rootfs",
 		},
 		Snapshot: &contracthost.DurableSnapshotSpec{
 			SnapshotID:        "snap1",
@@ -863,10 +848,19 @@ func TestRestoreSnapshotRejectsWhenRestoreNetworkInUseOnHost(t *testing.T) {
 			ImageID:           "image-1",
 			SourceRuntimeHost: "172.16.0.2",
 			SourceTapDevice:   "fctap0",
+			Artifacts: []contracthost.SnapshotArtifact{
+				{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", DownloadURL: server.URL + "/system"},
+			},
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "still in use on this host") {
-		t.Fatalf("restore snapshot error = %v, want restore network in-use failure", err)
+	if err != nil {
+		t.Fatalf("restore snapshot error = %v, want success", err)
+	}
+	if response.Machine.Phase != contracthost.MachinePhaseStarting {
+		t.Fatalf("restored machine phase mismatch: got %q", response.Machine.Phase)
+	}
+	if runtime.bootCalls != 1 {
+		t.Fatalf("boot call count mismatch: got %d want 1", runtime.bootCalls)
 	}
 	if runtime.restoreCalls != 0 {
 		t.Fatalf("restore boot should not be attempted, got %d calls", runtime.restoreCalls)

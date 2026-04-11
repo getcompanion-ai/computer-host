@@ -472,20 +472,10 @@ func TestRestoreSnapshotTransitionsToStartingWithoutRelayAllocation(t *testing.T
 	if err := os.WriteFile(snapDisk, []byte("disk"), 0o644); err != nil {
 		t.Fatalf("write snapshot disk: %v", err)
 	}
-	memPath := filepath.Join(snapDir, "memory.bin")
-	if err := os.WriteFile(memPath, []byte("mem"), 0o644); err != nil {
-		t.Fatalf("write memory snapshot: %v", err)
-	}
-	statePath := filepath.Join(snapDir, "vmstate.bin")
-	if err := os.WriteFile(statePath, []byte("state"), 0o644); err != nil {
-		t.Fatalf("write vmstate snapshot: %v", err)
-	}
 	if err := baseStore.CreateSnapshot(context.Background(), model.SnapshotRecord{
 		ID:                "snap-exhausted",
 		MachineID:         "source",
 		Artifact:          artifactRef,
-		MemFilePath:       memPath,
-		StateFilePath:     statePath,
 		DiskPaths:         []string{snapDisk},
 		SourceRuntimeHost: "172.16.0.2",
 		SourceTapDevice:   "fctap0",
@@ -495,11 +485,9 @@ func TestRestoreSnapshotTransitionsToStartingWithoutRelayAllocation(t *testing.T
 	}
 
 	server := newRestoreArtifactServer(t, map[string][]byte{
-		"/kernel":  []byte("kernel"),
-		"/rootfs":  []byte("rootfs"),
-		"/memory":  []byte("mem"),
-		"/vmstate": []byte("state"),
-		"/system":  []byte("disk"),
+		"/kernel": []byte("kernel"),
+		"/rootfs": []byte("rootfs"),
+		"/system": []byte("disk"),
 	})
 	defer server.Close()
 
@@ -514,8 +502,6 @@ func TestRestoreSnapshotTransitionsToStartingWithoutRelayAllocation(t *testing.T
 			MachineID:  "source",
 			ImageID:    "image-1",
 			Artifacts: []contracthost.SnapshotArtifact{
-				{ID: "memory", Kind: contracthost.SnapshotArtifactKindMemory, Name: "memory.bin", DownloadURL: server.URL + "/memory"},
-				{ID: "vmstate", Kind: contracthost.SnapshotArtifactKindVMState, Name: "vmstate.bin", DownloadURL: server.URL + "/vmstate"},
 				{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", DownloadURL: server.URL + "/system"},
 			},
 		},
@@ -694,11 +680,9 @@ func TestRestoreSnapshotCleansStagingArtifactsAfterSuccess(t *testing.T) {
 	hostDaemon.reconfigureGuestIdentity = func(context.Context, string, contracthost.MachineID, *contracthost.GuestConfig) error { return nil }
 
 	server := newRestoreArtifactServer(t, map[string][]byte{
-		"/kernel":  []byte("kernel"),
-		"/rootfs":  []byte("rootfs"),
-		"/memory":  []byte("mem"),
-		"/vmstate": []byte("state"),
-		"/system":  []byte("disk"),
+		"/kernel": []byte("kernel"),
+		"/rootfs": []byte("rootfs"),
+		"/system": []byte("disk"),
 	})
 	defer server.Close()
 
@@ -715,8 +699,6 @@ func TestRestoreSnapshotCleansStagingArtifactsAfterSuccess(t *testing.T) {
 			SourceRuntimeHost: "172.16.0.2",
 			SourceTapDevice:   "fctap0",
 			Artifacts: []contracthost.SnapshotArtifact{
-				{ID: "memory", Kind: contracthost.SnapshotArtifactKindMemory, Name: "memory.bin", DownloadURL: server.URL + "/memory", SHA256Hex: mustSHA256Hex(t, []byte("mem"))},
-				{ID: "vmstate", Kind: contracthost.SnapshotArtifactKindVMState, Name: "vmstate.bin", DownloadURL: server.URL + "/vmstate", SHA256Hex: mustSHA256Hex(t, []byte("state"))},
 				{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", DownloadURL: server.URL + "/system", SHA256Hex: mustSHA256Hex(t, []byte("disk"))},
 			},
 		},
@@ -749,7 +731,7 @@ func TestRestoreSnapshotCleansStagingArtifactsAfterDownloadFailure(t *testing.T)
 	server := newRestoreArtifactServer(t, map[string][]byte{
 		"/kernel": []byte("kernel"),
 		"/rootfs": []byte("rootfs"),
-		"/memory": []byte("mem"),
+		"/system": []byte("disk"),
 	})
 	defer server.Close()
 
@@ -766,8 +748,7 @@ func TestRestoreSnapshotCleansStagingArtifactsAfterDownloadFailure(t *testing.T)
 			SourceRuntimeHost: "172.16.0.2",
 			SourceTapDevice:   "fctap0",
 			Artifacts: []contracthost.SnapshotArtifact{
-				{ID: "memory", Kind: contracthost.SnapshotArtifactKindMemory, Name: "memory.bin", DownloadURL: server.URL + "/memory", SHA256Hex: mustSHA256Hex(t, []byte("mem"))},
-				{ID: "vmstate", Kind: contracthost.SnapshotArtifactKindVMState, Name: "vmstate.bin", DownloadURL: server.URL + "/missing"},
+				{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", DownloadURL: server.URL + "/missing"},
 			},
 		},
 	})

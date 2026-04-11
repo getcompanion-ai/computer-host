@@ -21,21 +21,8 @@ type restoredSnapshotArtifact struct {
 	LocalPath string
 }
 
-func buildSnapshotArtifacts(memoryPath, vmstatePath string, diskPaths []string) ([]model.SnapshotArtifactRecord, error) {
-	artifacts := make([]model.SnapshotArtifactRecord, 0, len(diskPaths)+2)
-
-	memoryArtifact, err := snapshotArtifactRecord("memory", contracthost.SnapshotArtifactKindMemory, filepath.Base(memoryPath), memoryPath)
-	if err != nil {
-		return nil, err
-	}
-	artifacts = append(artifacts, memoryArtifact)
-
-	vmstateArtifact, err := snapshotArtifactRecord("vmstate", contracthost.SnapshotArtifactKindVMState, filepath.Base(vmstatePath), vmstatePath)
-	if err != nil {
-		return nil, err
-	}
-	artifacts = append(artifacts, vmstateArtifact)
-
+func buildSnapshotArtifacts(diskPaths []string) ([]model.SnapshotArtifactRecord, error) {
+	artifacts := make([]model.SnapshotArtifactRecord, 0, len(diskPaths))
 	for _, diskPath := range diskPaths {
 		base := filepath.Base(diskPath)
 		diskArtifact, err := snapshotArtifactRecord("disk-"+strings.TrimSuffix(base, filepath.Ext(base)), contracthost.SnapshotArtifactKindDisk, base, diskPath)
