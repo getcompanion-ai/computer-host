@@ -137,6 +137,18 @@ func (r *Runtime) Boot(ctx context.Context, spec MachineSpec, usedNetworks []Net
 	}
 	socketPath := procSocketPath(firecrackerPID)
 
+	if spec.MMDS != nil && spec.MMDS.Data != nil {
+		client := newAPIClient(socketPath)
+		if err := waitForSocket(ctx, client, socketPath); err != nil {
+			cleanup(network, paths, command, firecrackerPID)
+			return nil, fmt.Errorf("wait for firecracker socket: %w", err)
+		}
+		if err := client.PutMMDS(ctx, spec.MMDS.Data); err != nil {
+			cleanup(network, paths, command, firecrackerPID)
+			return nil, fmt.Errorf("put mmds data: %w", err)
+		}
+	}
+
 	now := time.Now().UTC()
 	state := MachineState{
 		ID:          spec.ID,
