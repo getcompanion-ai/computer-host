@@ -66,7 +66,7 @@ func configureMachine(ctx context.Context, client *apiClient, paths machinePaths
 	return nil
 }
 
-func launchJailedFirecracker(paths machinePaths, machineID MachineID, firecrackerBinaryPath string, jailerBinaryPath string, enablePCI bool) (*exec.Cmd, error) {
+func launchJailedFirecracker(paths machinePaths, machineID MachineID, firecrackerBinaryPath string, jailerBinaryPath string, enablePCI bool, configFilePath string) (*exec.Cmd, error) {
 	args := []string{
 		"--id", string(machineID),
 		"--uid", strconv.Itoa(os.Getuid()),
@@ -78,10 +78,16 @@ func launchJailedFirecracker(paths machinePaths, machineID MachineID, firecracke
 		"--new-pid-ns",
 		"--",
 		"--api-sock", defaultFirecrackerSocketPath,
-		"--log-path", paths.JailedFirecrackerLogPath,
-		"--level", defaultFirecrackerLogLevel,
-		"--show-level",
-		"--show-log-origin",
+	}
+	if configFilePath != "" {
+		args = append(args, "--config-file", configFilePath)
+	} else {
+		args = append(args,
+			"--log-path", paths.JailedFirecrackerLogPath,
+			"--level", defaultFirecrackerLogLevel,
+			"--show-level",
+			"--show-log-origin",
+		)
 	}
 	if enablePCI {
 		args = append(args, "--enable-pci")
