@@ -649,5 +649,5 @@ func syncDir(path string) error {
 }
 
 func repairDirtyFilesystem(diskPath string) {
-	_ = exec.Command("e2fsck", "-fy", diskPath).Run()
+	_ = exec.Command("/usr/sbin/e2fsck", "-fy", diskPath).Run()
 }
