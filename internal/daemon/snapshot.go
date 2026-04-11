@@ -256,6 +256,13 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 	if err := os.MkdirAll(filepath.Dir(newSystemDiskPath), 0o755); err != nil {
 		return nil, fmt.Errorf("create machine disk dir: %w", err)
 	}
+	removeMachineDiskDirOnFailure := true
+	defer func() {
+		if !removeMachineDiskDirOnFailure {
+			return
+		}
+		_ = os.RemoveAll(filepath.Dir(newSystemDiskPath))
+	}()
 	systemDiskPath, ok := restoredArtifacts["system.img"]
 	if !ok {
 		clearOperation = true
@@ -265,11 +272,11 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		clearOperation = true
 		return nil, fmt.Errorf("copy system disk for restore: %w", err)
 	}
-	if err := injectMachineIdentity(ctx, newSystemDiskPath, req.MachineID); err != nil {
+	if err := d.injectMachineIdentity(ctx, newSystemDiskPath, req.MachineID); err != nil {
 		clearOperation = true
 		return nil, fmt.Errorf("inject machine identity for restore: %w", err)
 	}
-	if err := injectGuestConfig(ctx, newSystemDiskPath, guestConfig); err != nil {
+	if err := d.injectGuestConfig(ctx, newSystemDiskPath, guestConfig); err != nil {
 		clearOperation = true
 		return nil, fmt.Errorf("inject guest config for restore: %w", err)
 	}
@@ -308,19 +315,16 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 	}
 	spec, err := d.buildMachineSpec(req.MachineID, artifact, userVolumes, newSystemDiskPath, guestConfig)
 	if err != nil {
-		_ = os.RemoveAll(filepath.Dir(newSystemDiskPath))
 		clearOperation = true
 		return nil, fmt.Errorf("build machine spec for restore: %w", err)
 	}
 	usedNetworks, err := d.listRunningNetworks(ctx, req.MachineID)
 	if err != nil {
-		_ = os.RemoveAll(filepath.Dir(newSystemDiskPath))
 		clearOperation = true
 		return nil, err
 	}
 	machineState, err := d.runtime.Boot(ctx, spec, usedNetworks)
 	if err != nil {
-		_ = os.RemoveAll(filepath.Dir(newSystemDiskPath))
 		clearOperation = true
 		return nil, fmt.Errorf("boot restored machine: %w", err)
 	}
@@ -338,7 +342,6 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		CreatedAt:         now,
 	}); err != nil {
 		_ = d.runtime.Delete(ctx, *machineState)
-		_ = os.RemoveAll(filepath.Dir(newSystemDiskPath))
 		clearOperation = true
 		return nil, fmt.Errorf("create system volume record for restore: %w", err)
 	}
@@ -358,7 +361,6 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 			}
 			_ = d.store.DeleteVolume(context.Background(), systemVolumeID)
 			_ = d.runtime.Delete(ctx, *machineState)
-			_ = os.RemoveAll(filepath.Dir(newSystemDiskPath))
 			clearOperation = true
 			return nil, fmt.Errorf("create restored user volume record %q: %w", volume.ID, err)
 		}
@@ -387,11 +389,11 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		}
 		_ = d.store.DeleteVolume(context.Background(), systemVolumeID)
 		_ = d.runtime.Delete(ctx, *machineState)
-		_ = os.RemoveAll(filepath.Dir(newSystemDiskPath))
 		clearOperation = true
 		return nil, err
 	}
 
+	removeMachineDiskDirOnFailure = false
 	clearOperation = true
 	return &contracthost.RestoreSnapshotResponse{
 		Machine: machineToContract(machineRecord),

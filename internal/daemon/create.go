@@ -69,15 +69,6 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	if err := cloneDiskFile(artifact.RootFSPath, systemVolumePath, d.config.DiskCloneMode); err != nil {
 		return nil, fmt.Errorf("clone rootfs for %q: %w", req.MachineID, err)
 	}
-	if err := os.Truncate(systemVolumePath, defaultGuestDiskSizeBytes); err != nil {
-		return nil, fmt.Errorf("expand system volume for %q: %w", req.MachineID, err)
-	}
-	if err := injectMachineIdentity(ctx, systemVolumePath, req.MachineID); err != nil {
-		return nil, fmt.Errorf("inject machine identity for %q: %w", req.MachineID, err)
-	}
-	if err := injectGuestConfig(ctx, systemVolumePath, guestConfig); err != nil {
-		return nil, fmt.Errorf("inject guest config for %q: %w", req.MachineID, err)
-	}
 	removeSystemVolumeOnFailure := true
 	defer func() {
 		if !removeSystemVolumeOnFailure {
@@ -86,6 +77,15 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 		_ = os.Remove(systemVolumePath)
 		_ = os.RemoveAll(filepath.Dir(systemVolumePath))
 	}()
+	if err := os.Truncate(systemVolumePath, defaultGuestDiskSizeBytes); err != nil {
+		return nil, fmt.Errorf("expand system volume for %q: %w", req.MachineID, err)
+	}
+	if err := d.injectMachineIdentity(ctx, systemVolumePath, req.MachineID); err != nil {
+		return nil, fmt.Errorf("inject machine identity for %q: %w", req.MachineID, err)
+	}
+	if err := d.injectGuestConfig(ctx, systemVolumePath, guestConfig); err != nil {
+		return nil, fmt.Errorf("inject guest config for %q: %w", req.MachineID, err)
+	}
 
 	spec, err := d.buildMachineSpec(req.MachineID, artifact, userVolumes, systemVolumePath, guestConfig)
 	if err != nil {

@@ -10,14 +10,14 @@ import (
 	"strings"
 	"time"
 
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
 	"github.com/getcompanion-ai/computer-host/internal/store"
+	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
 func (d *Daemon) GetMachine(ctx context.Context, id contracthost.MachineID) (*contracthost.GetMachineResponse, error) {
-	record, err := d.store.GetMachine(ctx, id)
+	record, err := d.reconcileMachine(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -527,26 +527,37 @@ func (d *Daemon) shutdownGuestClean(ctx context.Context, record *model.MachineRe
 	defer cancel()
 
 	if err := d.shutdownGuest(shutdownCtx, record.RuntimeHost); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: guest poweroff for %q failed: %v\n", record.ID, err)
-		return false
+		if ctx.Err() != nil {
+			return false
+		}
+		if shutdownCtx.Err() == nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			fmt.Fprintf(os.Stderr, "warning: guest poweroff for %q failed: %v\n", record.ID, err)
+			return false
+		}
+		fmt.Fprintf(os.Stderr, "warning: guest poweroff for %q timed out before confirmation; checking whether shutdown is already in progress: %v\n", record.ID, err)
 	}
 
-	deadline := time.After(defaultGuestStopTimeout)
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
+		state, err := d.runtime.Inspect(machineToRuntimeState(*record))
+		if err != nil {
+			return false
+		}
+		if state.Phase != firecracker.PhaseRunning {
+			return true
+		}
+
 		select {
-		case <-deadline:
+		case <-ctx.Done():
+			return false
+		case <-shutdownCtx.Done():
+			if ctx.Err() != nil {
+				return false
+			}
 			fmt.Fprintf(os.Stderr, "warning: guest %q did not exit within stop window; forcing teardown\n", record.ID)
 			return false
 		case <-ticker.C:
-			state, err := d.runtime.Inspect(machineToRuntimeState(*record))
-			if err != nil {
-				return false
-			}
-			if state.Phase != firecracker.PhaseRunning {
-				return true
-			}
 		}
 	}
 }

@@ -263,6 +263,48 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	}
 }
 
+func TestCreateMachineCleansSystemVolumeOnInjectFailure(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	hostDaemon, err := New(cfg, fileStore, &fakeRuntime{})
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	hostDaemon.injectMachineIdentity = func(context.Context, string, contracthost.MachineID) error {
+		return errors.New("inject failed")
+	}
+
+	server := newRestoreArtifactServer(t, map[string][]byte{
+		"/kernel": []byte("kernel-image"),
+		"/rootfs": buildTestExt4ImageBytes(t),
+	})
+	defer server.Close()
+
+	_, err = hostDaemon.CreateMachine(context.Background(), contracthost.CreateMachineRequest{
+		MachineID: "vm-inject-fail",
+		Artifact: contracthost.ArtifactRef{
+			KernelImageURL: server.URL + "/kernel",
+			RootFSURL:      server.URL + "/rootfs",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "inject machine identity") {
+		t.Fatalf("CreateMachine error = %v, want inject machine identity failure", err)
+	}
+
+	systemVolumePath := hostDaemon.systemVolumePath("vm-inject-fail")
+	if _, statErr := os.Stat(systemVolumePath); !os.IsNotExist(statErr) {
+		t.Fatalf("system volume should be cleaned up, stat err = %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Dir(systemVolumePath)); !os.IsNotExist(statErr) {
+		t.Fatalf("system volume dir should be cleaned up, stat err = %v", statErr)
+	}
+}
+
 func TestStopMachineSyncsGuestFilesystemBeforeDelete(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
@@ -337,7 +379,7 @@ func TestStopMachineSyncsGuestFilesystemBeforeDelete(t *testing.T) {
 	}
 }
 
-func TestReconcileStartingMachinePersonalizesBeforeRunning(t *testing.T) {
+func TestGetMachineReconcilesStartingMachineBeforeRunning(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
 	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
@@ -384,10 +426,6 @@ func TestReconcileStartingMachinePersonalizesBeforeRunning(t *testing.T) {
 		StartedAt:      &startedAt,
 	}); err != nil {
 		t.Fatalf("create machine: %v", err)
-	}
-
-	if err := hostDaemon.Reconcile(context.Background()); err != nil {
-		t.Fatalf("Reconcile returned error: %v", err)
 	}
 
 	response, err := hostDaemon.GetMachine(context.Background(), "vm-starting")
@@ -512,6 +550,92 @@ func TestReconcileStartingMachineIgnoresPersonalizationFailures(t *testing.T) {
 	}
 	if len(runtime.deleteCalls) != 0 {
 		t.Fatalf("runtime delete calls = %d, want 0", len(runtime.deleteCalls))
+	}
+}
+
+func TestShutdownGuestCleanChecksGuestStateAfterPoweroffTimeout(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	runtime := &fakeRuntime{
+		inspectOverride: func(state firecracker.MachineState) (*firecracker.MachineState, error) {
+			state.Phase = firecracker.PhaseStopped
+			state.PID = 0
+			return &state, nil
+		},
+	}
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	hostDaemon.shutdownGuest = func(context.Context, string) error {
+		return context.DeadlineExceeded
+	}
+
+	now := time.Now().UTC()
+	record := &model.MachineRecord{
+		ID:          "vm-timeout",
+		RuntimeHost: "172.16.0.2",
+		TapDevice:   "fctap-timeout",
+		Phase:       contracthost.MachinePhaseRunning,
+		PID:         1234,
+		SocketPath:  filepath.Join(root, "runtime", "vm-timeout.sock"),
+		Ports:       defaultMachinePorts(),
+		CreatedAt:   now,
+		StartedAt:   &now,
+	}
+
+	if ok := hostDaemon.shutdownGuestClean(context.Background(), record); !ok {
+		t.Fatal("shutdownGuestClean should treat a timed-out poweroff as success when the VM is already stopped")
+	}
+}
+
+func TestShutdownGuestCleanRespectsContextCancellation(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	runtime := &fakeRuntime{
+		inspectOverride: func(state firecracker.MachineState) (*firecracker.MachineState, error) {
+			state.Phase = firecracker.PhaseRunning
+			return &state, nil
+		},
+	}
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	hostDaemon.shutdownGuest = func(context.Context, string) error { return nil }
+
+	now := time.Now().UTC()
+	record := &model.MachineRecord{
+		ID:          "vm-cancel",
+		RuntimeHost: "172.16.0.2",
+		TapDevice:   "fctap-cancel",
+		Phase:       contracthost.MachinePhaseRunning,
+		PID:         1234,
+		SocketPath:  filepath.Join(root, "runtime", "vm-cancel.sock"),
+		Ports:       defaultMachinePorts(),
+		CreatedAt:   now,
+		StartedAt:   &now,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	if ok := hostDaemon.shutdownGuestClean(ctx, record); ok {
+		t.Fatal("shutdownGuestClean should not report a clean shutdown after cancellation")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("shutdownGuestClean took %v after cancellation, want fast return", elapsed)
 	}
 }
 

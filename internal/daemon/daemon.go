@@ -46,6 +46,8 @@ type Daemon struct {
 
 	reconfigureGuestIdentity func(context.Context, string, contracthost.MachineID, *contracthost.GuestConfig) error
 	readGuestSSHPublicKey    func(context.Context, string) (string, error)
+	injectMachineIdentity    func(context.Context, string, contracthost.MachineID) error
+	injectGuestConfig        func(context.Context, string, *contracthost.GuestConfig) error
 	syncGuestFilesystem      func(context.Context, string) error
 	shutdownGuest            func(context.Context, string) error
 	personalizeGuest         func(context.Context, *model.MachineRecord, firecracker.MachineState) error
@@ -86,6 +88,8 @@ func New(cfg appconfig.Config, store store.Store, runtime Runtime) (*Daemon, err
 		runtime:                  runtime,
 		reconfigureGuestIdentity: nil,
 		readGuestSSHPublicKey:    nil,
+		injectMachineIdentity:    nil,
+		injectGuestConfig:        nil,
 		personalizeGuest:         nil,
 		machineLocks:             make(map[contracthost.MachineID]*sync.Mutex),
 		artifactLocks:            make(map[string]*sync.Mutex),
@@ -94,6 +98,8 @@ func New(cfg appconfig.Config, store store.Store, runtime Runtime) (*Daemon, err
 	}
 	daemon.reconfigureGuestIdentity = daemon.reconfigureGuestIdentityOverSSH
 	daemon.readGuestSSHPublicKey = readGuestSSHPublicKey
+	daemon.injectMachineIdentity = injectMachineIdentity
+	daemon.injectGuestConfig = injectGuestConfig
 	daemon.syncGuestFilesystem = daemon.syncGuestFilesystemOverSSH
 	daemon.shutdownGuest = daemon.issueGuestPoweroff
 	daemon.personalizeGuest = daemon.personalizeGuestConfig

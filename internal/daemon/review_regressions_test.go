@@ -773,6 +773,58 @@ func TestRestoreSnapshotCleansStagingArtifactsAfterDownloadFailure(t *testing.T)
 	}
 }
 
+func TestRestoreSnapshotCleansMachineDiskDirOnInjectFailure(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := hoststore.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	runtime := &fakeRuntime{}
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
+	hostDaemon.injectMachineIdentity = func(context.Context, string, contracthost.MachineID) error {
+		return errors.New("inject failed")
+	}
+
+	server := newRestoreArtifactServer(t, map[string][]byte{
+		"/kernel": []byte("kernel"),
+		"/rootfs": []byte("rootfs"),
+		"/system": buildTestExt4ImageBytes(t),
+	})
+	defer server.Close()
+
+	_, err = hostDaemon.RestoreSnapshot(context.Background(), "snap-inject-fail", contracthost.RestoreSnapshotRequest{
+		MachineID: "restored-inject-fail",
+		Artifact: contracthost.ArtifactRef{
+			KernelImageURL: server.URL + "/kernel",
+			RootFSURL:      server.URL + "/rootfs",
+		},
+		Snapshot: &contracthost.DurableSnapshotSpec{
+			SnapshotID:        "snap-inject-fail",
+			MachineID:         "source",
+			ImageID:           "image-1",
+			SourceRuntimeHost: "172.16.0.2",
+			SourceTapDevice:   "fctap0",
+			Artifacts: []contracthost.SnapshotArtifact{
+				{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", DownloadURL: server.URL + "/system"},
+			},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "inject machine identity for restore") {
+		t.Fatalf("RestoreSnapshot error = %v, want inject machine identity failure", err)
+	}
+
+	machineDiskDir := filepath.Join(cfg.MachineDisksDir, "restored-inject-fail")
+	if _, statErr := os.Stat(machineDiskDir); !os.IsNotExist(statErr) {
+		t.Fatalf("machine disk dir should be cleaned up, stat err = %v", statErr)
+	}
+}
+
 func TestReconcileUsesReconciledMachineStateForPublishedPorts(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
