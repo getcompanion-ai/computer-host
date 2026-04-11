@@ -66,7 +66,7 @@ func configureMachine(ctx context.Context, client *apiClient, paths machinePaths
 	return nil
 }
 
-func launchJailedFirecracker(paths machinePaths, machineID MachineID, firecrackerBinaryPath string, jailerBinaryPath string, enablePCI bool, configFilePath string, metadataFilePath string) (*exec.Cmd, error) {
+func launchJailedFirecracker(paths machinePaths, machineID MachineID, firecrackerBinaryPath string, jailerBinaryPath string, enablePCI bool, configFilePath string) (*exec.Cmd, error) {
 	args := []string{
 		"--id", string(machineID),
 		"--uid", strconv.Itoa(os.Getuid()),
@@ -81,9 +81,6 @@ func launchJailedFirecracker(paths machinePaths, machineID MachineID, firecracke
 	}
 	if configFilePath != "" {
 		args = append(args, "--config-file", configFilePath)
-		if metadataFilePath != "" {
-			args = append(args, "--metadata", metadataFilePath)
-		}
 	} else {
 		args = append(args,
 			"--log-path", paths.JailedFirecrackerLogPath,

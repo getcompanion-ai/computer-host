@@ -125,13 +125,7 @@ func (r *Runtime) Boot(ctx context.Context, spec MachineSpec, usedNetworks []Net
 		return nil, fmt.Errorf("write config file: %w", err)
 	}
 
-	metadataFilePath, err := writeMetadataFile(paths.ChrootRootDir, spec)
-	if err != nil {
-		cleanup(network, paths, nil, 0)
-		return nil, fmt.Errorf("write metadata file: %w", err)
-	}
-
-	command, err := launchJailedFirecracker(paths, spec.ID, r.firecrackerBinaryPath, r.jailerBinaryPath, r.enablePCI, configFilePath, metadataFilePath)
+	command, err := launchJailedFirecracker(paths, spec.ID, r.firecrackerBinaryPath, r.jailerBinaryPath, r.enablePCI, configFilePath)
 	if err != nil {
 		cleanup(network, paths, nil, 0)
 		return nil, err
@@ -142,6 +136,18 @@ func (r *Runtime) Boot(ctx context.Context, spec MachineSpec, usedNetworks []Net
 		return nil, fmt.Errorf("wait for firecracker pid: %w", err)
 	}
 	socketPath := procSocketPath(firecrackerPID)
+
+	if spec.MMDS != nil && spec.MMDS.Data != nil {
+		client := newAPIClient(socketPath)
+		if err := waitForSocket(ctx, client, socketPath); err != nil {
+			cleanup(network, paths, command, firecrackerPID)
+			return nil, fmt.Errorf("wait for firecracker socket: %w", err)
+		}
+		if err := client.PutMMDS(ctx, spec.MMDS.Data); err != nil {
+			cleanup(network, paths, command, firecrackerPID)
+			return nil, fmt.Errorf("put mmds data: %w", err)
+		}
+	}
 
 	now := time.Now().UTC()
 	state := MachineState{
@@ -282,7 +288,7 @@ func (r *Runtime) RestoreBoot(ctx context.Context, loadSpec SnapshotLoadSpec, us
 		return nil, err
 	}
 
-	command, err := launchJailedFirecracker(paths, loadSpec.ID, r.firecrackerBinaryPath, r.jailerBinaryPath, r.enablePCI, "", "")
+	command, err := launchJailedFirecracker(paths, loadSpec.ID, r.firecrackerBinaryPath, r.jailerBinaryPath, r.enablePCI, "")
 	if err != nil {
 		cleanup(network, paths, nil, 0)
 		return nil, err

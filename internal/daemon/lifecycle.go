@@ -32,7 +32,11 @@ func (d *Daemon) ListMachines(ctx context.Context) (*contracthost.ListMachinesRe
 
 	machines := make([]contracthost.Machine, 0, len(records))
 	for _, record := range records {
-		machines = append(machines, machineToContract(record))
+		reconciled, err := d.reconcileMachine(ctx, record.ID)
+		if err != nil {
+			return nil, err
+		}
+		machines = append(machines, machineToContract(*reconciled))
 	}
 	return &contracthost.ListMachinesResponse{Machines: machines}, nil
 }
@@ -386,8 +390,13 @@ func (d *Daemon) reconcileMachine(ctx context.Context, machineID contracthost.Ma
 		if !ready {
 			return record, nil
 		}
-		_ = d.personalizeGuest(ctx, record, *state)
-		guestSSHPublicKey, _ := d.readGuestSSHPublicKey(ctx, state.RuntimeHost)
+		if err := d.personalizeGuest(ctx, record, *state); err != nil {
+			return d.failMachineStartup(ctx, record, err.Error())
+		}
+		guestSSHPublicKey, err := d.readGuestSSHPublicKey(ctx, state.RuntimeHost)
+		if err != nil {
+			return d.failMachineStartup(ctx, record, err.Error())
+		}
 		record.RuntimeHost = state.RuntimeHost
 		record.TapDevice = state.TapName
 		record.Ports = defaultMachinePorts()
