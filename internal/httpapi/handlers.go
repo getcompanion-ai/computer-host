@@ -15,6 +15,7 @@ type Service interface {
 	GetMachine(context.Context, contracthost.MachineID) (*contracthost.GetMachineResponse, error)
 	ListMachines(context.Context) (*contracthost.ListMachinesResponse, error)
 	StartMachine(context.Context, contracthost.MachineID) (*contracthost.GetMachineResponse, error)
+	EnsureExecRelay(context.Context, contracthost.MachineID) (*contracthost.GetMachineResponse, error)
 	StopMachine(context.Context, contracthost.MachineID) error
 	DeleteMachine(context.Context, contracthost.MachineID) error
 	Health(context.Context) (*contracthost.HealthResponse, error)
@@ -158,6 +159,20 @@ func (h *Handler) handleMachine(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		response, err := h.service.StartMachine(r.Context(), machineID)
+		if err != nil {
+			writeError(w, statusForError(err), err)
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "exec-relay" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		response, err := h.service.EnsureExecRelay(r.Context(), machineID)
 		if err != nil {
 			writeError(w, statusForError(err), err)
 			return

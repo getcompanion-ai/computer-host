@@ -300,14 +300,40 @@ func isZeroChunk(chunk []byte) bool {
 }
 
 func defaultMachinePorts() []contracthost.MachinePort {
-	return buildMachinePorts(0, 0)
+	return buildMachinePorts(0, 0, 0)
 }
 
-func buildMachinePorts(sshRelayPort, vncRelayPort uint16) []contracthost.MachinePort {
+func buildMachinePorts(sshRelayPort, vncRelayPort, execRelayPort uint16) []contracthost.MachinePort {
 	return []contracthost.MachinePort{
 		{Name: contracthost.MachinePortNameSSH, Port: defaultSSHPort, HostPort: sshRelayPort, Protocol: contracthost.PortProtocolTCP},
 		{Name: contracthost.MachinePortNameVNC, Port: defaultVNCPort, HostPort: vncRelayPort, Protocol: contracthost.PortProtocolTCP},
+		{Name: contracthost.MachinePortNameExec, Port: defaultGuestdPort, HostPort: execRelayPort, Protocol: contracthost.PortProtocolTCP},
 	}
+}
+
+func setMachineExecRelayPort(ports []contracthost.MachinePort, relayPort uint16) []contracthost.MachinePort {
+	updated := make([]contracthost.MachinePort, 0, len(ports))
+	replaced := false
+	for _, port := range ports {
+		if port.Name == contracthost.MachinePortNameExec {
+			port.HostPort = relayPort
+			if port.Port == 0 {
+				port.Port = defaultGuestdPort
+			}
+			port.Protocol = contracthost.PortProtocolTCP
+			replaced = true
+		}
+		updated = append(updated, port)
+	}
+	if !replaced {
+		updated = append(updated, contracthost.MachinePort{
+			Name:     contracthost.MachinePortNameExec,
+			Port:     defaultGuestdPort,
+			HostPort: relayPort,
+			Protocol: contracthost.PortProtocolTCP,
+		})
+	}
+	return updated
 }
 
 func (d *Daemon) ensureBackendSSHKeyPair() error {

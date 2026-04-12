@@ -158,10 +158,10 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	if response.Machine.RuntimeHost != "127.0.0.1" {
 		t.Fatalf("runtime host mismatch: got %q", response.Machine.RuntimeHost)
 	}
-	if len(response.Machine.Ports) != 2 {
-		t.Fatalf("machine ports mismatch: got %d want 2", len(response.Machine.Ports))
+	if len(response.Machine.Ports) != 3 {
+		t.Fatalf("machine ports mismatch: got %d want 3", len(response.Machine.Ports))
 	}
-	if response.Machine.Ports[0].Port != defaultSSHPort || response.Machine.Ports[1].Port != defaultVNCPort {
+	if response.Machine.Ports[0].Port != defaultSSHPort || response.Machine.Ports[1].Port != defaultVNCPort || response.Machine.Ports[2].Port != defaultGuestdPort {
 		t.Fatalf("machine ports mismatch: got %#v", response.Machine.Ports)
 	}
 	if runtime.bootCalls != 1 {

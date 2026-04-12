@@ -23,6 +23,7 @@ const (
 	defaultGuestDiskSizeBytes   = int64(10 * 1024 * 1024 * 1024) // 10 GB
 	defaultSSHPort              = uint16(2222)
 	defaultVNCPort              = uint16(6080)
+	defaultGuestdPort           = uint16(49983)
 	defaultCopyBufferSize       = 1024 * 1024
 	defaultGuestDialTimeout     = 500 * time.Millisecond
 	defaultGuestStopTimeout     = 10 * time.Second

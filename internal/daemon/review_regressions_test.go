@@ -915,7 +915,7 @@ func exhaustedMachineRelayRecords() []model.MachineRecord {
 	for i := 0; i < count; i++ {
 		machines = append(machines, model.MachineRecord{
 			ID:    contracthost.MachineID(fmt.Sprintf("relay-exhausted-%d", i)),
-			Ports: buildMachinePorts(minMachineSSHRelayPort+uint16(i), minMachineVNCRelayPort+uint16(i)),
+			Ports: buildMachinePorts(minMachineSSHRelayPort+uint16(i), minMachineVNCRelayPort+uint16(i), 0),
 			Phase: contracthost.MachinePhaseRunning,
 		})
 	}

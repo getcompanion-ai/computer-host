@@ -5,8 +5,9 @@ type MachinePortName string
 type PortProtocol string
 
 const (
-	MachinePortNameSSH MachinePortName = "ssh"
-	MachinePortNameVNC MachinePortName = "vnc"
+	MachinePortNameSSH  MachinePortName = "ssh"
+	MachinePortNameVNC  MachinePortName = "vnc"
+	MachinePortNameExec MachinePortName = "exec"
 )
 
 const (

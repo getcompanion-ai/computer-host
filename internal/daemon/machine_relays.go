@@ -12,10 +12,12 @@ import (
 )
 
 const (
-	minMachineSSHRelayPort = uint16(40000)
-	maxMachineSSHRelayPort = uint16(44999)
-	minMachineVNCRelayPort = uint16(45000)
-	maxMachineVNCRelayPort = uint16(49999)
+	minMachineSSHRelayPort  = uint16(40000)
+	maxMachineSSHRelayPort  = uint16(44999)
+	minMachineVNCRelayPort  = uint16(45000)
+	maxMachineVNCRelayPort  = uint16(49999)
+	minMachineExecRelayPort = uint16(50000)
+	maxMachineExecRelayPort = uint16(54999)
 )
 
 func machineRelayListenerKey(machineID contracthost.MachineID, name contracthost.MachinePortName) string {
@@ -40,6 +42,8 @@ func machineRelayGuestPort(record model.MachineRecord, name contracthost.Machine
 	switch name {
 	case contracthost.MachinePortNameVNC:
 		return defaultVNCPort
+	case contracthost.MachinePortNameExec:
+		return defaultGuestdPort
 	default:
 		return defaultSSHPort
 	}
@@ -126,7 +130,7 @@ func (d *Daemon) ensureMachineRelays(ctx context.Context, record *model.MachineR
 		return err
 	}
 
-	record.Ports = buildMachinePorts(sshRelayPort, vncRelayPort)
+	record.Ports = buildMachinePorts(sshRelayPort, vncRelayPort, machineRelayHostPort(*record, contracthost.MachinePortNameExec))
 	if err := d.store.UpdateMachine(ctx, *record); err != nil {
 		d.stopMachineRelays(record.ID)
 		return err
@@ -177,6 +181,7 @@ func (d *Daemon) stopMachineRelayProxy(machineID contracthost.MachineID, name co
 func (d *Daemon) stopMachineRelays(machineID contracthost.MachineID) {
 	d.stopMachineRelayProxy(machineID, contracthost.MachinePortNameSSH)
 	d.stopMachineRelayProxy(machineID, contracthost.MachinePortNameVNC)
+	d.stopMachineRelayProxy(machineID, contracthost.MachinePortNameExec)
 }
 
 func isAddrInUseError(err error) bool {
