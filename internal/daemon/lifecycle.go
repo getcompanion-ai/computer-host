@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
 	"github.com/getcompanion-ai/computer-host/internal/store"
@@ -50,7 +52,11 @@ func (d *Daemon) StartMachine(ctx context.Context, id contracthost.MachineID) (*
 		return &contracthost.GetMachineResponse{Machine: machineToContract(*record)}, nil
 	}
 	if record.Phase == contracthost.MachinePhaseStarting {
-		return &contracthost.GetMachineResponse{Machine: machineToContract(*record)}, nil
+		reconciled, err := d.reconcileMachine(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return &contracthost.GetMachineResponse{Machine: machineToContract(*reconciled)}, nil
 	}
 	if record.Phase != contracthost.MachinePhaseStopped {
 		return nil, fmt.Errorf("machine %q is not startable from phase %q", id, record.Phase)
@@ -71,21 +77,38 @@ func (d *Daemon) StartMachine(ctx context.Context, id contracthost.MachineID) (*
 		}
 	}()
 
-	systemVolume, err := d.store.GetVolume(ctx, record.SystemVolumeID)
-	if err != nil {
-		return nil, err
-	}
-	artifact, err := d.store.GetArtifact(ctx, record.Artifact)
-	if err != nil {
-		return nil, err
-	}
-	userVolumes, err := d.loadAttachableUserVolumes(ctx, id, record.UserVolumeIDs)
-	if err != nil {
+	var (
+		systemVolume *model.VolumeRecord
+		artifact     *model.ArtifactRecord
+		userVolumes  []model.VolumeRecord
+		readyNonce   string
+	)
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		var err error
+		systemVolume, err = d.store.GetVolume(groupCtx, record.SystemVolumeID)
+		return err
+	})
+	group.Go(func() error {
+		var err error
+		artifact, err = d.store.GetArtifact(groupCtx, record.Artifact)
+		return err
+	})
+	group.Go(func() error {
+		var err error
+		userVolumes, err = d.loadAttachableUserVolumes(groupCtx, id, record.UserVolumeIDs)
+		return err
+	})
+	group.Go(func() error {
+		var err error
+		readyNonce, err = newGuestReadyNonce()
+		return err
+	})
+	if err := group.Wait(); err != nil {
 		return nil, err
 	}
 	repairDirtyFilesystem(systemVolume.Path)
-
-	spec, err := d.buildMachineSpec(id, artifact, userVolumes, systemVolume.Path, record.GuestConfig)
+	spec, err := d.buildMachineSpec(id, artifact, userVolumes, systemVolume.Path, record.GuestConfig, readyNonce)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +123,7 @@ func (d *Daemon) StartMachine(ctx context.Context, id contracthost.MachineID) (*
 	record.RuntimeHost = state.RuntimeHost
 	record.TapDevice = state.TapName
 	record.Ports = defaultMachinePorts()
-	record.GuestSSHPublicKey = ""
+	record.GuestReadyNonce = readyNonce
 	record.Phase = contracthost.MachinePhaseStarting
 	record.Error = ""
 	record.PID = state.PID
@@ -109,6 +132,11 @@ func (d *Daemon) StartMachine(ctx context.Context, id contracthost.MachineID) (*
 	if err := d.store.UpdateMachine(ctx, *record); err != nil {
 		_ = d.runtime.Delete(context.Background(), *state)
 		_ = d.store.UpdateMachine(context.Background(), previousRecord)
+		return nil, err
+	}
+
+	record, err = d.completeMachineStartup(ctx, record, *state)
+	if err != nil {
 		return nil, err
 	}
 
@@ -376,44 +404,7 @@ func (d *Daemon) reconcileMachine(ctx context.Context, machineID contracthost.Ma
 		return nil, err
 	}
 	if record.Phase == contracthost.MachinePhaseStarting {
-		if state.Phase != firecracker.PhaseRunning {
-			return d.failMachineStartup(ctx, record, state.Error)
-		}
-		ready, err := guestPortsReady(ctx, state.RuntimeHost, defaultMachinePorts())
-		if err != nil {
-			return nil, err
-		}
-		if !ready {
-			return record, nil
-		}
-		if err := d.personalizeGuest(ctx, record, *state); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: guest personalization for %q failed: %v\n", record.ID, err)
-		}
-		guestSSHPublicKey, err := d.readGuestSSHPublicKey(ctx, state.RuntimeHost)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: read guest ssh public key for %q failed: %v\n", record.ID, err)
-			guestSSHPublicKey = record.GuestSSHPublicKey
-		}
-		record.RuntimeHost = state.RuntimeHost
-		record.TapDevice = state.TapName
-		record.Ports = defaultMachinePorts()
-		record.GuestSSHPublicKey = guestSSHPublicKey
-		record.Phase = contracthost.MachinePhaseRunning
-		record.Error = ""
-		record.PID = state.PID
-		record.SocketPath = state.SocketPath
-		record.StartedAt = state.StartedAt
-		if err := d.store.UpdateMachine(ctx, *record); err != nil {
-			return nil, err
-		}
-		if err := d.ensureMachineRelays(ctx, record); err != nil {
-			return d.failMachineStartup(ctx, record, err.Error())
-		}
-		if err := d.ensurePublishedPortsForMachine(ctx, *record); err != nil {
-			d.stopMachineRelays(record.ID)
-			return d.failMachineStartup(ctx, record, err.Error())
-		}
-		return record, nil
+		return d.completeMachineStartup(ctx, record, *state)
 	}
 	if state.Phase == firecracker.PhaseRunning {
 		if err := d.ensureMachineRelays(ctx, record); err != nil {
@@ -450,7 +441,7 @@ func (d *Daemon) failMachineStartup(ctx context.Context, record *model.MachineRe
 	record.Phase = contracthost.MachinePhaseFailed
 	record.Error = strings.TrimSpace(failureReason)
 	record.Ports = defaultMachinePorts()
-	record.GuestSSHPublicKey = ""
+	record.GuestReadyNonce = ""
 	record.PID = 0
 	record.SocketPath = ""
 	record.RuntimeHost = ""
@@ -511,6 +502,7 @@ func (d *Daemon) stopMachineRecord(ctx context.Context, record *model.MachineRec
 
 	record.Phase = contracthost.MachinePhaseStopped
 	record.Error = ""
+	record.GuestReadyNonce = ""
 	record.PID = 0
 	record.SocketPath = ""
 	record.RuntimeHost = ""

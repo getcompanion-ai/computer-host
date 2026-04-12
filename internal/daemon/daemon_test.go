@@ -152,7 +152,7 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 		t.Fatalf("create machine: %v", err)
 	}
 
-	if response.Machine.Phase != contracthost.MachinePhaseStarting {
+	if response.Machine.Phase != contracthost.MachinePhaseRunning {
 		t.Fatalf("machine phase mismatch: got %q", response.Machine.Phase)
 	}
 	if response.Machine.RuntimeHost != "127.0.0.1" {
@@ -230,7 +230,7 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	if machine.SystemVolumeID != "vm-1-system" {
 		t.Fatalf("system volume mismatch: got %q", machine.SystemVolumeID)
 	}
-	if machine.Phase != contracthost.MachinePhaseStarting {
+	if machine.Phase != contracthost.MachinePhaseRunning {
 		t.Fatalf("stored machine phase mismatch: got %q", machine.Phase)
 	}
 	if machine.GuestConfig == nil || len(machine.GuestConfig.AuthorizedKeys) == 0 {
@@ -401,7 +401,7 @@ func TestGetMachineReconcilesStartingMachineBeforeRunning(t *testing.T) {
 	t.Cleanup(func() { hostDaemon.stopMachineRelays("vm-starting") })
 
 	personalized := false
-	hostDaemon.personalizeGuest = func(_ context.Context, record *model.MachineRecord, state firecracker.MachineState) error {
+	hostDaemon.personalizeGuest = func(_ context.Context, record *model.MachineRecord, state firecracker.MachineState) (*guestReadyResult, error) {
 		personalized = true
 		if record.ID != "vm-starting" {
 			t.Fatalf("personalized machine mismatch: got %q", record.ID)
@@ -409,9 +409,15 @@ func TestGetMachineReconcilesStartingMachineBeforeRunning(t *testing.T) {
 		if state.RuntimeHost != "127.0.0.1" || state.PID != 4321 {
 			t.Fatalf("personalized state mismatch: %#v", state)
 		}
-		return nil
+		guestSSHPublicKey := strings.TrimSpace(record.GuestSSHPublicKey)
+		if guestSSHPublicKey == "" {
+			guestSSHPublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO0j1AyW0mQm9a1G2rY0R4fP2G5+4Qx2V3FJ9P2mA6N3"
+		}
+		return &guestReadyResult{
+			ReadyNonce:        record.GuestReadyNonce,
+			GuestSSHPublicKey: guestSSHPublicKey,
+		}, nil
 	}
-	stubGuestSSHPublicKeyReader(hostDaemon)
 
 	if err := fileStore.CreateMachine(context.Background(), model.MachineRecord{
 		ID:             "vm-starting",
@@ -455,9 +461,9 @@ func TestListMachinesDoesNotReconcileStartingMachines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
-	hostDaemon.personalizeGuest = func(context.Context, *model.MachineRecord, firecracker.MachineState) error {
+	hostDaemon.personalizeGuest = func(context.Context, *model.MachineRecord, firecracker.MachineState) (*guestReadyResult, error) {
 		t.Fatalf("ListMachines should not reconcile guest personalization")
-		return nil
+		return nil, nil
 	}
 	hostDaemon.readGuestSSHPublicKey = func(context.Context, string) (string, error) {
 		t.Fatalf("ListMachines should not read guest ssh public key")
@@ -492,7 +498,7 @@ func TestListMachinesDoesNotReconcileStartingMachines(t *testing.T) {
 	}
 }
 
-func TestReconcileStartingMachineIgnoresPersonalizationFailures(t *testing.T) {
+func TestReconcileStartingMachineFailsWhenHandshakeFails(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
 	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
@@ -511,11 +517,8 @@ func TestReconcileStartingMachineIgnoresPersonalizationFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
-	hostDaemon.personalizeGuest = func(context.Context, *model.MachineRecord, firecracker.MachineState) error {
-		return errors.New("vsock EOF")
-	}
-	hostDaemon.readGuestSSHPublicKey = func(context.Context, string) (string, error) {
-		return "", errors.New("Permission denied")
+	hostDaemon.personalizeGuest = func(context.Context, *model.MachineRecord, firecracker.MachineState) (*guestReadyResult, error) {
+		return nil, errors.New("vsock EOF")
 	}
 
 	if err := fileStore.CreateMachine(context.Background(), model.MachineRecord{
@@ -542,14 +545,14 @@ func TestReconcileStartingMachineIgnoresPersonalizationFailures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get machine: %v", err)
 	}
-	if record.Phase != contracthost.MachinePhaseRunning {
-		t.Fatalf("machine phase = %q, want %q", record.Phase, contracthost.MachinePhaseRunning)
+	if record.Phase != contracthost.MachinePhaseFailed {
+		t.Fatalf("machine phase = %q, want %q", record.Phase, contracthost.MachinePhaseFailed)
 	}
-	if record.GuestSSHPublicKey != "ssh-ed25519 AAAAExistingHostKey" {
-		t.Fatalf("guest ssh public key = %q, want preserved value", record.GuestSSHPublicKey)
+	if !strings.Contains(record.Error, "vsock EOF") {
+		t.Fatalf("failure reason = %q, want vsock error", record.Error)
 	}
-	if len(runtime.deleteCalls) != 0 {
-		t.Fatalf("runtime delete calls = %d, want 0", len(runtime.deleteCalls))
+	if len(runtime.deleteCalls) != 1 {
+		t.Fatalf("runtime delete calls = %d, want 1", len(runtime.deleteCalls))
 	}
 }
 
@@ -756,7 +759,7 @@ func TestRestoreSnapshotFallsBackToLocalSnapshotNetwork(t *testing.T) {
 	if response.Machine.ID != "restored" {
 		t.Fatalf("restored machine id mismatch: got %q", response.Machine.ID)
 	}
-	if response.Machine.Phase != contracthost.MachinePhaseStarting {
+	if response.Machine.Phase != contracthost.MachinePhaseRunning {
 		t.Fatalf("restored machine phase mismatch: got %q", response.Machine.Phase)
 	}
 	if runtime.bootCalls != 1 {
@@ -1013,7 +1016,7 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 	if response.Machine.ID != "restored" {
 		t.Fatalf("restored machine id mismatch: got %q", response.Machine.ID)
 	}
-	if response.Machine.Phase != contracthost.MachinePhaseStarting {
+	if response.Machine.Phase != contracthost.MachinePhaseRunning {
 		t.Fatalf("restored machine phase mismatch: got %q", response.Machine.Phase)
 	}
 	if runtime.bootCalls != 1 {
@@ -1033,7 +1036,7 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get restored machine: %v", err)
 	}
-	if machine.Phase != contracthost.MachinePhaseStarting {
+	if machine.Phase != contracthost.MachinePhaseRunning {
 		t.Fatalf("restored machine phase mismatch: got %q", machine.Phase)
 	}
 	if machine.GuestConfig == nil || machine.GuestConfig.Hostname != "restored-shell" {
@@ -1126,7 +1129,7 @@ func TestRestoreSnapshotBootsWithFreshNetworkWhenSourceNetworkInUseOnHost(t *tes
 	if err != nil {
 		t.Fatalf("restore snapshot error = %v, want success", err)
 	}
-	if response.Machine.Phase != contracthost.MachinePhaseStarting {
+	if response.Machine.Phase != contracthost.MachinePhaseRunning {
 		t.Fatalf("restored machine phase mismatch: got %q", response.Machine.Phase)
 	}
 	if runtime.bootCalls != 1 {
@@ -1254,8 +1257,15 @@ func TestGuestKernelArgsRemovesPCIOffWhenPCIEnabled(t *testing.T) {
 }
 
 func stubGuestSSHPublicKeyReader(hostDaemon *Daemon) {
-	hostDaemon.readGuestSSHPublicKey = func(context.Context, string) (string, error) {
-		return "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO0j1AyW0mQm9a1G2rY0R4fP2G5+4Qx2V3FJ9P2mA6N3", nil
+	hostDaemon.personalizeGuest = func(_ context.Context, record *model.MachineRecord, _ firecracker.MachineState) (*guestReadyResult, error) {
+		guestSSHPublicKey := strings.TrimSpace(record.GuestSSHPublicKey)
+		if guestSSHPublicKey == "" {
+			guestSSHPublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO0j1AyW0mQm9a1G2rY0R4fP2G5+4Qx2V3FJ9P2mA6N3"
+		}
+		return &guestReadyResult{
+			ReadyNonce:        record.GuestReadyNonce,
+			GuestSSHPublicKey: guestSSHPublicKey,
+		}, nil
 	}
 }
 

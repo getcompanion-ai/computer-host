@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
@@ -52,13 +55,34 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 		}
 	}()
 
-	artifact, err := d.ensureArtifact(ctx, req.Artifact)
-	if err != nil {
-		return nil, err
-	}
-
-	userVolumes, err := d.loadAttachableUserVolumes(ctx, req.MachineID, req.UserVolumeIDs)
-	if err != nil {
+	var (
+		artifact     *model.ArtifactRecord
+		userVolumes  []model.VolumeRecord
+		guestHostKey *guestSSHHostKeyPair
+		readyNonce   string
+	)
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		var err error
+		artifact, err = d.ensureArtifact(groupCtx, req.Artifact)
+		return err
+	})
+	group.Go(func() error {
+		var err error
+		userVolumes, err = d.loadAttachableUserVolumes(groupCtx, req.MachineID, req.UserVolumeIDs)
+		return err
+	})
+	group.Go(func() error {
+		var err error
+		guestHostKey, err = generateGuestSSHHostKeyPair(groupCtx)
+		return err
+	})
+	group.Go(func() error {
+		var err error
+		readyNonce, err = newGuestReadyNonce()
+		return err
+	})
+	if err := group.Wait(); err != nil {
 		return nil, err
 	}
 
@@ -86,8 +110,11 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	if err := d.injectGuestConfig(ctx, systemVolumePath, guestConfig); err != nil {
 		return nil, fmt.Errorf("inject guest config for %q: %w", req.MachineID, err)
 	}
+	if err := injectGuestSSHHostKey(ctx, systemVolumePath, guestHostKey); err != nil {
+		return nil, fmt.Errorf("inject guest ssh host key for %q: %w", req.MachineID, err)
+	}
 
-	spec, err := d.buildMachineSpec(req.MachineID, artifact, userVolumes, systemVolumePath, guestConfig)
+	spec, err := d.buildMachineSpec(req.MachineID, artifact, userVolumes, systemVolumePath, guestConfig, readyNonce)
 	if err != nil {
 		return nil, err
 	}
@@ -135,19 +162,21 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	}
 
 	record := model.MachineRecord{
-		ID:             req.MachineID,
-		Artifact:       req.Artifact,
-		GuestConfig:    cloneGuestConfig(guestConfig),
-		SystemVolumeID: systemVolumeRecord.ID,
-		UserVolumeIDs:  append([]contracthost.VolumeID(nil), attachedUserVolumeIDs...),
-		RuntimeHost:    state.RuntimeHost,
-		TapDevice:      state.TapName,
-		Ports:          defaultMachinePorts(),
-		Phase:          contracthost.MachinePhaseStarting,
-		PID:            state.PID,
-		SocketPath:     state.SocketPath,
-		CreatedAt:      now,
-		StartedAt:      state.StartedAt,
+		ID:                req.MachineID,
+		Artifact:          req.Artifact,
+		GuestConfig:       cloneGuestConfig(guestConfig),
+		SystemVolumeID:    systemVolumeRecord.ID,
+		UserVolumeIDs:     append([]contracthost.VolumeID(nil), attachedUserVolumeIDs...),
+		RuntimeHost:       state.RuntimeHost,
+		TapDevice:         state.TapName,
+		Ports:             defaultMachinePorts(),
+		GuestSSHPublicKey: strings.TrimSpace(guestHostKey.PublicKey),
+		GuestReadyNonce:   readyNonce,
+		Phase:             contracthost.MachinePhaseStarting,
+		PID:               state.PID,
+		SocketPath:        state.SocketPath,
+		CreatedAt:         now,
+		StartedAt:         state.StartedAt,
 	}
 	if err := d.store.CreateMachine(ctx, record); err != nil {
 		for _, volume := range userVolumes {
@@ -159,12 +188,17 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 		return nil, err
 	}
 
+	recordReady, err := d.completeMachineStartup(ctx, &record, *state)
+	if err != nil {
+		return nil, err
+	}
+
 	removeSystemVolumeOnFailure = false
 	clearOperation = true
-	return &contracthost.CreateMachineResponse{Machine: machineToContract(record)}, nil
+	return &contracthost.CreateMachineResponse{Machine: machineToContract(*recordReady)}, nil
 }
 
-func (d *Daemon) buildMachineSpec(machineID contracthost.MachineID, artifact *model.ArtifactRecord, userVolumes []model.VolumeRecord, systemVolumePath string, guestConfig *contracthost.GuestConfig) (firecracker.MachineSpec, error) {
+func (d *Daemon) buildMachineSpec(machineID contracthost.MachineID, artifact *model.ArtifactRecord, userVolumes []model.VolumeRecord, systemVolumePath string, guestConfig *contracthost.GuestConfig, readyNonce string) (firecracker.MachineSpec, error) {
 	drives := make([]firecracker.DriveSpec, 0, len(userVolumes))
 	for i, volume := range userVolumes {
 		drives = append(drives, firecracker.DriveSpec{
@@ -176,7 +210,7 @@ func (d *Daemon) buildMachineSpec(machineID contracthost.MachineID, artifact *mo
 		})
 	}
 
-	mmds, err := d.guestMetadataSpec(machineID, guestConfig)
+	mmds, err := d.guestMetadataSpec(machineID, guestConfig, readyNonce)
 	if err != nil {
 		return firecracker.MachineSpec{}, err
 	}
@@ -221,10 +255,14 @@ func (d *Daemon) ensureArtifact(ctx context.Context, ref contracthost.ArtifactRe
 
 	kernelPath := filepath.Join(dir, "kernel")
 	rootFSPath := filepath.Join(dir, "rootfs")
-	if err := downloadFile(ctx, ref.KernelImageURL, kernelPath); err != nil {
-		return nil, err
-	}
-	if err := downloadFile(ctx, ref.RootFSURL, rootFSPath); err != nil {
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		return downloadFile(groupCtx, ref.KernelImageURL, kernelPath)
+	})
+	group.Go(func() error {
+		return downloadFile(groupCtx, ref.RootFSURL, rootFSPath)
+	})
+	if err := group.Wait(); err != nil {
 		return nil, err
 	}
 

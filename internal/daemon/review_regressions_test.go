@@ -299,7 +299,7 @@ func TestReconcileRestorePreservesArtifactsOnUnexpectedStoreError(t *testing.T) 
 	assertOperationCount(t, baseStore, 1)
 }
 
-func TestStartMachineTransitionsToStartingWithoutRelayAllocation(t *testing.T) {
+func TestStartMachineTransitionsToRunningWithHandshake(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
 	baseStore, err := hoststore.NewFileStore(cfg.StatePath, cfg.OperationsPath)
@@ -386,16 +386,16 @@ func TestStartMachineTransitionsToStartingWithoutRelayAllocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartMachine error = %v", err)
 	}
-	if response.Machine.Phase != contracthost.MachinePhaseStarting {
-		t.Fatalf("response machine phase = %q, want %q", response.Machine.Phase, contracthost.MachinePhaseStarting)
+	if response.Machine.Phase != contracthost.MachinePhaseRunning {
+		t.Fatalf("response machine phase = %q, want %q", response.Machine.Phase, contracthost.MachinePhaseRunning)
 	}
 
 	machine, err := baseStore.GetMachine(context.Background(), "vm-start")
 	if err != nil {
 		t.Fatalf("get machine: %v", err)
 	}
-	if machine.Phase != contracthost.MachinePhaseStarting {
-		t.Fatalf("machine phase = %q, want %q", machine.Phase, contracthost.MachinePhaseStarting)
+	if machine.Phase != contracthost.MachinePhaseRunning {
+		t.Fatalf("machine phase = %q, want %q", machine.Phase, contracthost.MachinePhaseRunning)
 	}
 	if machine.RuntimeHost != "127.0.0.1" || machine.TapDevice != "fctap-start" {
 		t.Fatalf("machine runtime state mismatch, got runtime_host=%q tap=%q", machine.RuntimeHost, machine.TapDevice)
@@ -408,7 +408,7 @@ func TestStartMachineTransitionsToStartingWithoutRelayAllocation(t *testing.T) {
 	}
 }
 
-func TestRestoreSnapshotTransitionsToStartingWithoutRelayAllocation(t *testing.T) {
+func TestRestoreSnapshotTransitionsToRunningWithHandshake(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
 	baseStore, err := hoststore.NewFileStore(cfg.StatePath, cfg.OperationsPath)
@@ -510,8 +510,8 @@ func TestRestoreSnapshotTransitionsToStartingWithoutRelayAllocation(t *testing.T
 	if err != nil {
 		t.Fatalf("RestoreSnapshot returned error: %v", err)
 	}
-	if response.Machine.Phase != contracthost.MachinePhaseStarting {
-		t.Fatalf("restored machine phase = %q, want %q", response.Machine.Phase, contracthost.MachinePhaseStarting)
+	if response.Machine.Phase != contracthost.MachinePhaseRunning {
+		t.Fatalf("restored machine phase = %q, want %q", response.Machine.Phase, contracthost.MachinePhaseRunning)
 	}
 	if _, err := baseStore.GetVolume(context.Background(), "restored-exhausted-system"); err != nil {
 		t.Fatalf("restored system volume record should exist: %v", err)

@@ -25,6 +25,7 @@ type guestMetadataPayload struct {
 	Version           string                          `json:"version"`
 	MachineID         string                          `json:"machine_id"`
 	Hostname          string                          `json:"hostname"`
+	ReadyNonce        string                          `json:"ready_nonce,omitempty"`
 	AuthorizedKeys    []string                        `json:"authorized_keys,omitempty"`
 	TrustedUserCAKeys []string                        `json:"trusted_user_ca_keys,omitempty"`
 	LoginWebhook      *contracthost.GuestLoginWebhook `json:"login_webhook,omitempty"`
@@ -55,7 +56,7 @@ func guestHostname(machineID contracthost.MachineID, guestConfig *contracthost.G
 	return strings.TrimSpace(string(machineID))
 }
 
-func (d *Daemon) guestMetadataSpec(machineID contracthost.MachineID, guestConfig *contracthost.GuestConfig) (*firecracker.MMDSSpec, error) {
+func (d *Daemon) guestMetadataSpec(machineID contracthost.MachineID, guestConfig *contracthost.GuestConfig, readyNonce string) (*firecracker.MMDSSpec, error) {
 	name := guestHostname(machineID, guestConfig)
 	if name == "" {
 		return nil, fmt.Errorf("machine id is required")
@@ -67,6 +68,7 @@ func (d *Daemon) guestMetadataSpec(machineID contracthost.MachineID, guestConfig
 				Version:           defaultMMDSPayloadVersion,
 				MachineID:         name,
 				Hostname:          name,
+				ReadyNonce:        strings.TrimSpace(readyNonce),
 				AuthorizedKeys:    nil,
 				TrustedUserCAKeys: nil,
 			},

@@ -348,6 +348,42 @@ func (d *Daemon) writeBackendSSHPublicKey(privateKeyPath string, publicKeyPath s
 	return nil
 }
 
+type guestSSHHostKeyPair struct {
+	PrivateKey []byte
+	PublicKey  string
+}
+
+func generateGuestSSHHostKeyPair(ctx context.Context) (*guestSSHHostKeyPair, error) {
+	stagingDir, err := os.MkdirTemp("", "guest-ssh-hostkey-*")
+	if err != nil {
+		return nil, fmt.Errorf("create guest ssh host key staging dir: %w", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(stagingDir)
+	}()
+
+	privateKeyPath := filepath.Join(stagingDir, "ssh_host_ed25519_key")
+	command := exec.CommandContext(ctx, "ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", privateKeyPath)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("generate guest ssh host keypair: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+
+	privateKey, err := os.ReadFile(privateKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read guest ssh host private key %q: %w", privateKeyPath, err)
+	}
+	publicKey, err := os.ReadFile(privateKeyPath + ".pub")
+	if err != nil {
+		return nil, fmt.Errorf("read guest ssh host public key %q: %w", privateKeyPath+".pub", err)
+	}
+
+	return &guestSSHHostKeyPair{
+		PrivateKey: privateKey,
+		PublicKey:  strings.TrimSpace(string(publicKey)),
+	}, nil
+}
+
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
@@ -438,6 +474,41 @@ func injectGuestConfig(ctx context.Context, imagePath string, config *contractho
 			return err
 		}
 	}
+	return nil
+}
+
+func injectGuestSSHHostKey(ctx context.Context, imagePath string, keyPair *guestSSHHostKeyPair) error {
+	if keyPair == nil {
+		return fmt.Errorf("guest ssh host keypair is required")
+	}
+	if strings.TrimSpace(keyPair.PublicKey) == "" {
+		return fmt.Errorf("guest ssh host public key is required")
+	}
+
+	stagingDir, err := os.MkdirTemp(filepath.Dir(imagePath), "guest-ssh-hostkey-*")
+	if err != nil {
+		return fmt.Errorf("create guest ssh host key staging dir: %w", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(stagingDir)
+	}()
+
+	privateKeyPath := filepath.Join(stagingDir, "ssh_host_ed25519_key")
+	if err := os.WriteFile(privateKeyPath, keyPair.PrivateKey, 0o600); err != nil {
+		return fmt.Errorf("write guest ssh host private key staging file: %w", err)
+	}
+	if err := replaceExt4File(ctx, imagePath, privateKeyPath, "/etc/ssh/ssh_host_ed25519_key"); err != nil {
+		return err
+	}
+
+	publicKeyPath := privateKeyPath + ".pub"
+	if err := os.WriteFile(publicKeyPath, []byte(strings.TrimSpace(keyPair.PublicKey)+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write guest ssh host public key staging file: %w", err)
+	}
+	if err := replaceExt4File(ctx, imagePath, publicKeyPath, "/etc/ssh/ssh_host_ed25519_key.pub"); err != nil {
+		return err
+	}
+
 	return nil
 }
 

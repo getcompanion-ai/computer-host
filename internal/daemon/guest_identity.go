@@ -20,7 +20,7 @@ func (d *Daemon) reconfigureGuestIdentityOverSSH(ctx context.Context, runtimeHos
 	if machineName == "" {
 		return fmt.Errorf("machine id is required")
 	}
-	mmds, err := d.guestMetadataSpec(machineID, guestConfig)
+	mmds, err := d.guestMetadataSpec(machineID, guestConfig, "")
 	if err != nil {
 		return err
 	}

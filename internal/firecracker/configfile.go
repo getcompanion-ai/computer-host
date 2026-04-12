@@ -8,15 +8,15 @@ import (
 )
 
 type vmConfig struct {
-	BootSource        vmBootSource        `json:"boot-source"`
-	Drives            []vmDrive           `json:"drives"`
-	MachineConfig     vmMachineConfig     `json:"machine-config"`
-	NetworkInterfaces []vmNetworkIface    `json:"network-interfaces"`
-	Vsock             *vmVsock            `json:"vsock,omitempty"`
-	Logger            *vmLogger           `json:"logger,omitempty"`
-	MMDSConfig        *vmMMDSConfig       `json:"mmds-config,omitempty"`
-	Entropy           *vmEntropy          `json:"entropy,omitempty"`
-	Serial            *vmSerial           `json:"serial,omitempty"`
+	BootSource        vmBootSource     `json:"boot-source"`
+	Drives            []vmDrive        `json:"drives"`
+	MachineConfig     vmMachineConfig  `json:"machine-config"`
+	NetworkInterfaces []vmNetworkIface `json:"network-interfaces"`
+	Vsock             *vmVsock         `json:"vsock,omitempty"`
+	Logger            *vmLogger        `json:"logger,omitempty"`
+	MMDSConfig        *vmMMDSConfig    `json:"mmds-config,omitempty"`
+	Entropy           *vmEntropy       `json:"entropy,omitempty"`
+	Serial            *vmSerial        `json:"serial,omitempty"`
 }
 
 type vmBootSource struct {

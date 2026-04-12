@@ -245,10 +245,33 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		return nil, err
 	}
 	defer cleanupRestoreArtifacts()
-	artifact, err := d.ensureArtifact(ctx, req.Artifact)
-	if err != nil {
+	var (
+		artifact     *model.ArtifactRecord
+		guestHostKey *guestSSHHostKeyPair
+		readyNonce   string
+	)
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		var err error
+		artifact, err = d.ensureArtifact(groupCtx, req.Artifact)
+		if err != nil {
+			return fmt.Errorf("ensure artifact for restore: %w", err)
+		}
+		return nil
+	})
+	group.Go(func() error {
+		var err error
+		guestHostKey, err = generateGuestSSHHostKeyPair(groupCtx)
+		return err
+	})
+	group.Go(func() error {
+		var err error
+		readyNonce, err = newGuestReadyNonce()
+		return err
+	})
+	if err := group.Wait(); err != nil {
 		clearOperation = true
-		return nil, fmt.Errorf("ensure artifact for restore: %w", err)
+		return nil, err
 	}
 
 	// COW-copy system disk from snapshot to new machine's disk dir.
@@ -279,6 +302,10 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 	if err := d.injectGuestConfig(ctx, newSystemDiskPath, guestConfig); err != nil {
 		clearOperation = true
 		return nil, fmt.Errorf("inject guest config for restore: %w", err)
+	}
+	if err := injectGuestSSHHostKey(ctx, newSystemDiskPath, guestHostKey); err != nil {
+		clearOperation = true
+		return nil, fmt.Errorf("inject guest ssh host key for restore: %w", err)
 	}
 
 	type restoredUserVolume struct {
@@ -313,7 +340,7 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 			Path: volume.Path,
 		})
 	}
-	spec, err := d.buildMachineSpec(req.MachineID, artifact, userVolumes, newSystemDiskPath, guestConfig)
+	spec, err := d.buildMachineSpec(req.MachineID, artifact, userVolumes, newSystemDiskPath, guestConfig, readyNonce)
 	if err != nil {
 		clearOperation = true
 		return nil, fmt.Errorf("build machine spec for restore: %w", err)
@@ -376,7 +403,8 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		RuntimeHost:       machineState.RuntimeHost,
 		TapDevice:         machineState.TapName,
 		Ports:             defaultMachinePorts(),
-		GuestSSHPublicKey: "",
+		GuestSSHPublicKey: strings.TrimSpace(guestHostKey.PublicKey),
+		GuestReadyNonce:   readyNonce,
 		Phase:             contracthost.MachinePhaseStarting,
 		PID:               machineState.PID,
 		SocketPath:        machineState.SocketPath,
@@ -393,10 +421,15 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		return nil, err
 	}
 
+	record, err := d.completeMachineStartup(ctx, &machineRecord, *machineState)
+	if err != nil {
+		return nil, err
+	}
+
 	removeMachineDiskDirOnFailure = false
 	clearOperation = true
 	return &contracthost.RestoreSnapshotResponse{
-		Machine: machineToContract(machineRecord),
+		Machine: machineToContract(*record),
 	}, nil
 }
 

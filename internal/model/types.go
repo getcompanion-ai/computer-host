@@ -36,6 +36,7 @@ type MachineRecord struct {
 	TapDevice         string
 	Ports             []contracthost.MachinePort
 	GuestSSHPublicKey string
+	GuestReadyNonce   string
 	Phase             contracthost.MachinePhase
 	Error             string
 	PID               int

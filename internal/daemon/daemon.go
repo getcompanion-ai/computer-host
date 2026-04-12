@@ -50,7 +50,7 @@ type Daemon struct {
 	injectGuestConfig        func(context.Context, string, *contracthost.GuestConfig) error
 	syncGuestFilesystem      func(context.Context, string) error
 	shutdownGuest            func(context.Context, string) error
-	personalizeGuest         func(context.Context, *model.MachineRecord, firecracker.MachineState) error
+	personalizeGuest         func(context.Context, *model.MachineRecord, firecracker.MachineState) (*guestReadyResult, error)
 
 	locksMu       sync.Mutex
 	machineLocks  map[contracthost.MachineID]*sync.Mutex

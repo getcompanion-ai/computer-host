@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -13,19 +14,31 @@ import (
 	"strings"
 	"time"
 
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
+	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
 const (
 	defaultGuestPersonalizationVsockID   = "microagent-personalizer"
 	defaultGuestPersonalizationVsockName = "microagent-personalizer.vsock"
 	defaultGuestPersonalizationVsockPort = uint32(1024)
-	defaultGuestPersonalizationTimeout   = 2 * time.Second
+	defaultGuestPersonalizationTimeout   = 15 * time.Second
+	guestPersonalizationRetryInterval    = 100 * time.Millisecond
 	minGuestVsockCID                     = uint32(3)
 	maxGuestVsockCID                     = uint32(1<<31 - 1)
 )
+
+type guestPersonalizationResponse struct {
+	Status            string `json:"status"`
+	ReadyNonce        string `json:"ready_nonce,omitempty"`
+	GuestSSHPublicKey string `json:"guest_ssh_public_key,omitempty"`
+	Error             string `json:"error,omitempty"`
+}
+
+type guestReadyRequest struct {
+	ReadyNonce string `json:"ready_nonce,omitempty"`
+}
 
 func guestVsockSpec(machineID contracthost.MachineID) *firecracker.VsockSpec {
 	return &firecracker.VsockSpec{
@@ -41,53 +54,46 @@ func guestVsockCID(machineID contracthost.MachineID) uint32 {
 	return minGuestVsockCID + binary.BigEndian.Uint32(sum[:4])%space
 }
 
-func (d *Daemon) personalizeGuestConfig(ctx context.Context, record *model.MachineRecord, state firecracker.MachineState) error {
+func (d *Daemon) personalizeGuestConfig(ctx context.Context, record *model.MachineRecord, state firecracker.MachineState) (*guestReadyResult, error) {
 	if record == nil {
-		return fmt.Errorf("machine record is required")
+		return nil, fmt.Errorf("machine record is required")
 	}
 
 	personalizeCtx, cancel := context.WithTimeout(ctx, defaultGuestPersonalizationTimeout)
 	defer cancel()
 
-	mmds, err := d.guestMetadataSpec(record.ID, record.GuestConfig)
+	response, err := sendGuestPersonalization(personalizeCtx, state, guestReadyRequest{
+		ReadyNonce: strings.TrimSpace(record.GuestReadyNonce),
+	})
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("wait for guest ready over vsock: %w", err)
 	}
-	envelope, ok := mmds.Data.(guestMetadataEnvelope)
-	if !ok {
-		return fmt.Errorf("guest metadata payload has unexpected type %T", mmds.Data)
+	if !strings.EqualFold(strings.TrimSpace(response.Status), "ok") {
+		message := strings.TrimSpace(response.Error)
+		if message == "" {
+			message = fmt.Sprintf("unexpected guest personalization status %q", strings.TrimSpace(response.Status))
+		}
+		return nil, errors.New(message)
 	}
-
-	if err := d.runtime.PutMMDS(personalizeCtx, state, mmds.Data); err != nil {
-		return d.personalizeGuestConfigViaSSH(ctx, record, state, fmt.Errorf("reseed guest mmds: %w", err))
-	}
-	if err := sendGuestPersonalization(personalizeCtx, state, envelope.Latest.MetaData); err != nil {
-		return d.personalizeGuestConfigViaSSH(ctx, record, state, fmt.Errorf("apply guest config over vsock: %w", err))
-	}
-	return nil
+	return &guestReadyResult{
+		ReadyNonce:        strings.TrimSpace(response.ReadyNonce),
+		GuestSSHPublicKey: strings.TrimSpace(response.GuestSSHPublicKey),
+	}, nil
 }
 
-func (d *Daemon) personalizeGuestConfigViaSSH(ctx context.Context, record *model.MachineRecord, state firecracker.MachineState, primaryErr error) error {
-	fallbackErr := d.reconfigureGuestIdentity(ctx, state.RuntimeHost, record.ID, record.GuestConfig)
-	if fallbackErr == nil {
-		return nil
-	}
-	return fmt.Errorf("%w; ssh fallback failed: %v", primaryErr, fallbackErr)
-}
-
-func sendGuestPersonalization(ctx context.Context, state firecracker.MachineState, payload guestMetadataPayload) error {
+func sendGuestPersonalization(ctx context.Context, state firecracker.MachineState, payload guestReadyRequest) (*guestPersonalizationResponse, error) {
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal guest personalization payload: %w", err)
+		return nil, fmt.Errorf("marshal guest personalization payload: %w", err)
 	}
 
 	vsockPath, err := guestVsockHostPath(state)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", vsockPath)
+	connection, err := dialGuestPersonalization(ctx, vsockPath)
 	if err != nil {
-		return fmt.Errorf("dial guest personalization vsock %q: %w", vsockPath, err)
+		return nil, err
 	}
 	defer func() {
 		_ = connection.Close()
@@ -96,27 +102,28 @@ func sendGuestPersonalization(ctx context.Context, state firecracker.MachineStat
 
 	reader := bufio.NewReader(connection)
 	if _, err := fmt.Fprintf(connection, "CONNECT %d\n", defaultGuestPersonalizationVsockPort); err != nil {
-		return fmt.Errorf("write vsock connect request: %w", err)
+		return nil, fmt.Errorf("write vsock connect request: %w", err)
 	}
 	response, err := reader.ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("read vsock connect response: %w", err)
+		return nil, fmt.Errorf("read vsock connect response: %w", err)
 	}
 	if !strings.HasPrefix(strings.TrimSpace(response), "OK ") {
-		return fmt.Errorf("unexpected vsock connect response %q", strings.TrimSpace(response))
+		return nil, fmt.Errorf("unexpected vsock connect response %q", strings.TrimSpace(response))
 	}
 
 	if _, err := connection.Write(append(payloadBytes, '\n')); err != nil {
-		return fmt.Errorf("write guest personalization payload: %w", err)
+		return nil, fmt.Errorf("write guest personalization payload: %w", err)
 	}
 	response, err = reader.ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("read guest personalization response: %w", err)
+		return nil, fmt.Errorf("read guest personalization response: %w", err)
 	}
-	if strings.TrimSpace(response) != "OK" {
-		return fmt.Errorf("unexpected guest personalization response %q", strings.TrimSpace(response))
+	var payloadResponse guestPersonalizationResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(response)), &payloadResponse); err != nil {
+		return nil, fmt.Errorf("decode guest personalization response %q: %w", strings.TrimSpace(response), err)
 	}
-	return nil
+	return &payloadResponse, nil
 }
 
 func guestVsockHostPath(state firecracker.MachineState) (string, error) {
@@ -132,4 +139,26 @@ func setConnectionDeadline(ctx context.Context, connection net.Conn) {
 		return
 	}
 	_ = connection.SetDeadline(time.Now().Add(defaultGuestPersonalizationTimeout))
+}
+
+func dialGuestPersonalization(ctx context.Context, vsockPath string) (net.Conn, error) {
+	dialer := &net.Dialer{}
+	for {
+		connection, err := dialer.DialContext(ctx, "unix", vsockPath)
+		if err == nil {
+			return connection, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return nil, fmt.Errorf("dial guest personalization vsock %q: %w", vsockPath, err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(guestPersonalizationRetryInterval):
+		}
+	}
 }
