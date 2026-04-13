@@ -1,3 +1,8 @@
+## computer-host
+
+<img width="3588" height="1184" alt="Gemini_Generated_Image_yxb12yyxb12yyxb1" src="https://github.com/user-attachments/assets/f7e6d927-568f-4a94-99a9-4664d1fc43f5" />
+
+
 computer-host is a daemon runtime for managing Firecracker microVMs
 on bare-metal Linux hosts. It talks directly to the Firecracker HTTP
 API via jailer, exposing a JSON interface over a Unix socket.
