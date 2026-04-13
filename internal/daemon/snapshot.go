@@ -489,7 +489,10 @@ func (d *Daemon) DeleteSnapshotByID(ctx context.Context, snapshotID contracthost
 	if err != nil {
 		return err
 	}
-	snapshotDir := filepath.Dir(snap.MemFilePath)
+	snapshotDir, ok := snapshotDirectory(*snap)
+	if !ok {
+		return fmt.Errorf("snapshot %q has no local artifact directory", snapshotID)
+	}
 	if err := os.RemoveAll(snapshotDir); err != nil {
 		return fmt.Errorf("remove snapshot dir %q: %w", snapshotDir, err)
 	}
@@ -518,6 +521,25 @@ func snapshotArtifactsToContract(artifacts []model.SnapshotArtifactRecord) []con
 		})
 	}
 	return converted
+}
+
+func snapshotDirectory(snapshot model.SnapshotRecord) (string, bool) {
+	for _, artifact := range snapshot.Artifacts {
+		if path := strings.TrimSpace(artifact.LocalPath); path != "" {
+			return filepath.Dir(path), true
+		}
+	}
+	for _, diskPath := range snapshot.DiskPaths {
+		if path := strings.TrimSpace(diskPath); path != "" {
+			return filepath.Dir(path), true
+		}
+	}
+	for _, legacyPath := range []string{snapshot.MemFilePath, snapshot.StateFilePath} {
+		if path := strings.TrimSpace(legacyPath); path != "" {
+			return filepath.Dir(path), true
+		}
+	}
+	return "", false
 }
 
 func orderedRestoredUserDiskArtifacts(artifacts map[string]restoredSnapshotArtifact) []restoredSnapshotArtifact {

@@ -523,7 +523,7 @@ func injectGuestSSHHostKey(ctx context.Context, imagePath string, keyPair *guest
 	if err := os.WriteFile(privateKeyPath, keyPair.PrivateKey, 0o600); err != nil {
 		return fmt.Errorf("write guest ssh host private key staging file: %w", err)
 	}
-	if err := replaceExt4File(ctx, imagePath, privateKeyPath, "/etc/ssh/ssh_host_ed25519_key"); err != nil {
+	if err := replaceExt4FileMode(ctx, imagePath, privateKeyPath, "/etc/ssh/ssh_host_ed25519_key", "100600"); err != nil {
 		return err
 	}
 
@@ -531,7 +531,7 @@ func injectGuestSSHHostKey(ctx context.Context, imagePath string, keyPair *guest
 	if err := os.WriteFile(publicKeyPath, []byte(strings.TrimSpace(keyPair.PublicKey)+"\n"), 0o644); err != nil {
 		return fmt.Errorf("write guest ssh host public key staging file: %w", err)
 	}
-	if err := replaceExt4File(ctx, imagePath, publicKeyPath, "/etc/ssh/ssh_host_ed25519_key.pub"); err != nil {
+	if err := replaceExt4FileMode(ctx, imagePath, publicKeyPath, "/etc/ssh/ssh_host_ed25519_key.pub", "100644"); err != nil {
 		return err
 	}
 
@@ -543,6 +543,7 @@ func injectMachineIdentity(ctx context.Context, imagePath string, machineID cont
 	if machineName == "" {
 		return fmt.Errorf("machine_id is required")
 	}
+	hostname := "agentcomputer"
 
 	stagingDir, err := os.MkdirTemp(filepath.Dir(imagePath), "machine-identity-*")
 	if err != nil {
@@ -553,11 +554,11 @@ func injectMachineIdentity(ctx context.Context, imagePath string, machineID cont
 	}()
 
 	identityFiles := map[string]string{
-		"/etc/microagent/machine-name": machineName + "\n",
-		"/etc/hostname":                machineName + "\n",
+		"/etc/microagent/machine-name": hostname + "\n",
+		"/etc/hostname":                hostname + "\n",
 		"/etc/hosts": fmt.Sprintf(
 			"127.0.0.1 localhost\n127.0.1.1 %s\n::1 localhost ip6-localhost ip6-loopback\nff02::1 ip6-allnodes\nff02::2 ip6-allrouters\n",
-			machineName,
+			hostname,
 		),
 	}
 
@@ -576,9 +577,18 @@ func injectMachineIdentity(ctx context.Context, imagePath string, machineID cont
 }
 
 func replaceExt4File(ctx context.Context, imagePath string, sourcePath string, targetPath string) error {
+	return replaceExt4FileMode(ctx, imagePath, sourcePath, targetPath, "")
+}
+
+func replaceExt4FileMode(ctx context.Context, imagePath string, sourcePath string, targetPath string, mode string) error {
 	_ = runDebugFS(ctx, imagePath, fmt.Sprintf("rm %s", targetPath))
 	if err := runDebugFS(ctx, imagePath, fmt.Sprintf("write %s %s", sourcePath, targetPath)); err != nil {
 		return fmt.Errorf("inject %q into %q: %w", targetPath, imagePath, err)
+	}
+	if mode != "" {
+		if err := runDebugFS(ctx, imagePath, fmt.Sprintf("set_inode_field %s mode 0%s", targetPath, mode)); err != nil {
+			return fmt.Errorf("set mode on %q in %q: %w", targetPath, imagePath, err)
+		}
 	}
 	return nil
 }

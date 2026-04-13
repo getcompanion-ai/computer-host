@@ -23,7 +23,7 @@ const (
 	defaultGuestPersonalizationVsockID   = "microagent-personalizer"
 	defaultGuestPersonalizationVsockName = "microagent-personalizer.vsock"
 	defaultGuestPersonalizationVsockPort = uint32(1024)
-	defaultGuestPersonalizationTimeout   = 15 * time.Second
+	defaultGuestPersonalizationTimeout   = 30 * time.Second
 	guestPersonalizationRetryInterval    = 100 * time.Millisecond
 	minGuestVsockCID                     = uint32(3)
 	maxGuestVsockCID                     = uint32(1<<31 - 1)
@@ -91,9 +91,34 @@ func sendGuestPersonalization(ctx context.Context, state firecracker.MachineStat
 	if err != nil {
 		return nil, err
 	}
-	connection, err := dialGuestPersonalization(ctx, vsockPath)
+
+	var lastErr error
+	for {
+		if ctx.Err() != nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, ctx.Err()
+		}
+
+		resp, err := tryGuestPersonalization(ctx, vsockPath, payloadBytes)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+
+		select {
+		case <-ctx.Done():
+			return nil, lastErr
+		case <-time.After(guestPersonalizationRetryInterval):
+		}
+	}
+}
+
+func tryGuestPersonalization(ctx context.Context, vsockPath string, payloadBytes []byte) (*guestPersonalizationResponse, error) {
+	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", vsockPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dial guest personalization vsock %q: %w", vsockPath, err)
 	}
 	defer func() {
 		_ = connection.Close()
@@ -139,26 +164,4 @@ func setConnectionDeadline(ctx context.Context, connection net.Conn) {
 		return
 	}
 	_ = connection.SetDeadline(time.Now().Add(defaultGuestPersonalizationTimeout))
-}
-
-func dialGuestPersonalization(ctx context.Context, vsockPath string) (net.Conn, error) {
-	dialer := &net.Dialer{}
-	for {
-		connection, err := dialer.DialContext(ctx, "unix", vsockPath)
-		if err == nil {
-			return connection, nil
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		var netErr net.Error
-		if errors.As(err, &netErr) && netErr.Timeout() {
-			return nil, fmt.Errorf("dial guest personalization vsock %q: %w", vsockPath, err)
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(guestPersonalizationRetryInterval):
-		}
-	}
 }

@@ -81,15 +81,15 @@ func TestInjectMachineIdentityWritesHostnameFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read hostname: %v", err)
 	}
-	if hostname != "kiruru\n" {
-		t.Fatalf("hostname mismatch: got %q want %q", hostname, "kiruru\n")
+	if hostname != "agentcomputer\n" {
+		t.Fatalf("hostname mismatch: got %q want %q", hostname, "agentcomputer\n")
 	}
 
 	hosts, err := readExt4File(imagePath, "/etc/hosts")
 	if err != nil {
 		t.Fatalf("read hosts: %v", err)
 	}
-	if !strings.Contains(hosts, "127.0.1.1 kiruru") {
+	if !strings.Contains(hosts, "127.0.1.1 agentcomputer") {
 		t.Fatalf("hosts missing machine name: %q", hosts)
 	}
 }

@@ -52,6 +52,9 @@ func (d *Daemon) StartMachine(ctx context.Context, id contracthost.MachineID) (*
 		return &contracthost.GetMachineResponse{Machine: machineToContract(*record)}, nil
 	}
 	if record.Phase == contracthost.MachinePhaseStarting {
+		// reconcileMachine acquires the machine lock, so we must release
+		// ours first to avoid self-deadlock.
+		unlock()
 		reconciled, err := d.reconcileMachine(ctx, id)
 		if err != nil {
 			return nil, err
@@ -220,6 +223,12 @@ func (d *Daemon) Reconcile(ctx context.Context) error {
 		return err
 	}
 	for _, operation := range operations {
+		unlock, ok := d.tryLockMachine(operation.MachineID)
+		if !ok {
+			continue
+		}
+		unlock()
+
 		switch operation.Type {
 		case model.MachineOperationCreate:
 			if err := d.reconcileCreate(ctx, operation.MachineID); err != nil {

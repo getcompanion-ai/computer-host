@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -55,19 +54,6 @@ type machineLookupErrorStore struct {
 
 func (s machineLookupErrorStore) GetMachine(context.Context, contracthost.MachineID) (*model.MachineRecord, error) {
 	return nil, s.err
-}
-
-type relayExhaustionStore struct {
-	hoststore.Store
-	extraMachines []model.MachineRecord
-}
-
-func (s relayExhaustionStore) ListMachines(ctx context.Context) ([]model.MachineRecord, error) {
-	machines, err := s.Store.ListMachines(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return append(machines, s.extraMachines...), nil
 }
 
 type publishedPortResult struct {
@@ -255,6 +241,52 @@ func TestReconcileSnapshotPreservesArtifactsOnUnexpectedStoreError(t *testing.T)
 	assertOperationCount(t, baseStore, 1)
 }
 
+func TestReconcileSkipsInFlightSnapshotOperationWhileMachineLocked(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	baseStore, err := hoststore.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	hostDaemon, err := New(cfg, baseStore, &fakeRuntime{})
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	stubGuestSSHPublicKeyReader(hostDaemon)
+
+	snapshotID := contracthost.SnapshotID("snap-inflight")
+	operation := model.OperationRecord{
+		MachineID:  "vm-1",
+		Type:       model.MachineOperationSnapshot,
+		StartedAt:  time.Now().UTC(),
+		SnapshotID: &snapshotID,
+	}
+	if err := baseStore.UpsertOperation(context.Background(), operation); err != nil {
+		t.Fatalf("upsert operation: %v", err)
+	}
+
+	snapshotDir := filepath.Join(cfg.SnapshotsDir, string(snapshotID))
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
+		t.Fatalf("create snapshot dir: %v", err)
+	}
+	markerPath := filepath.Join(snapshotDir, "keep.txt")
+	if err := os.WriteFile(markerPath, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("write marker file: %v", err)
+	}
+
+	unlock := hostDaemon.lockMachine("vm-1")
+	defer unlock()
+
+	if err := hostDaemon.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+	if _, statErr := os.Stat(markerPath); statErr != nil {
+		t.Fatalf("in-flight snapshot artifacts should be preserved, stat error: %v", statErr)
+	}
+	assertOperationCount(t, baseStore, 1)
+}
+
 func TestReconcileRestorePreservesArtifactsOnUnexpectedStoreError(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
@@ -307,11 +339,6 @@ func TestStartMachineTransitionsToRunningWithHandshake(t *testing.T) {
 		t.Fatalf("create file store: %v", err)
 	}
 
-	exhaustedStore := relayExhaustionStore{
-		Store:         baseStore,
-		extraMachines: exhaustedMachineRelayRecords(),
-	}
-
 	sshListener := listenTestPort(t, int(defaultSSHPort))
 	defer func() {
 		_ = sshListener.Close()
@@ -334,7 +361,7 @@ func TestStartMachineTransitionsToRunningWithHandshake(t *testing.T) {
 		},
 	}
 
-	hostDaemon, err := New(cfg, exhaustedStore, runtime)
+	hostDaemon, err := New(cfg, baseStore, runtime)
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
@@ -416,11 +443,6 @@ func TestRestoreSnapshotTransitionsToRunningWithHandshake(t *testing.T) {
 		t.Fatalf("create file store: %v", err)
 	}
 
-	exhaustedStore := relayExhaustionStore{
-		Store:         baseStore,
-		extraMachines: exhaustedMachineRelayRecords(),
-	}
-
 	startedAt := time.Unix(1700000300, 0).UTC()
 	runtime := &fakeRuntime{
 		bootState: firecracker.MachineState{
@@ -434,7 +456,7 @@ func TestRestoreSnapshotTransitionsToRunningWithHandshake(t *testing.T) {
 		},
 	}
 
-	hostDaemon, err := New(cfg, exhaustedStore, runtime)
+	hostDaemon, err := New(cfg, baseStore, runtime)
 	if err != nil {
 		t.Fatalf("create daemon: %v", err)
 	}
@@ -907,19 +929,6 @@ func waitPublishedPortResult(t *testing.T, ch <-chan publishedPortResult) publis
 		t.Fatal("timed out waiting for CreatePublishedPort result")
 		return publishedPortResult{}
 	}
-}
-
-func exhaustedMachineRelayRecords() []model.MachineRecord {
-	count := int(maxMachineSSHRelayPort-minMachineSSHRelayPort) + 1
-	machines := make([]model.MachineRecord, 0, count)
-	for i := 0; i < count; i++ {
-		machines = append(machines, model.MachineRecord{
-			ID:    contracthost.MachineID(fmt.Sprintf("relay-exhausted-%d", i)),
-			Ports: buildMachinePorts(minMachineSSHRelayPort+uint16(i), minMachineVNCRelayPort+uint16(i), 0),
-			Phase: contracthost.MachinePhaseRunning,
-		})
-	}
-	return machines
 }
 
 func mustSHA256Hex(t *testing.T, payload []byte) string {

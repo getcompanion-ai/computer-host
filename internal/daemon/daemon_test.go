@@ -944,6 +944,50 @@ func TestGetSnapshotArtifactReturnsLocalArtifactPath(t *testing.T) {
 	}
 }
 
+func TestDeleteSnapshotByIDRemovesDiskOnlySnapshotDirectory(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	hostDaemon, err := New(cfg, fileStore, &fakeRuntime{})
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+
+	snapshotDir := filepath.Join(root, "snapshots", "snap-delete")
+	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
+		t.Fatalf("create snapshot dir: %v", err)
+	}
+	systemPath := filepath.Join(snapshotDir, "system.img")
+	if err := os.WriteFile(systemPath, []byte("disk"), 0o644); err != nil {
+		t.Fatalf("write system disk: %v", err)
+	}
+	if err := fileStore.CreateSnapshot(context.Background(), model.SnapshotRecord{
+		ID:        "snap-delete",
+		MachineID: "source",
+		DiskPaths: []string{systemPath},
+		Artifacts: []model.SnapshotArtifactRecord{
+			{ID: "disk-system", Kind: contracthost.SnapshotArtifactKindDisk, Name: "system.img", LocalPath: systemPath, SizeBytes: 4},
+		},
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+
+	if err := hostDaemon.DeleteSnapshotByID(context.Background(), "snap-delete"); err != nil {
+		t.Fatalf("DeleteSnapshotByID returned error: %v", err)
+	}
+	if _, err := os.Stat(snapshotDir); !os.IsNotExist(err) {
+		t.Fatalf("snapshot dir should be removed, stat error: %v", err)
+	}
+	if _, err := fileStore.GetSnapshot(context.Background(), "snap-delete"); err != store.ErrNotFound {
+		t.Fatalf("snapshot should be removed from store, got: %v", err)
+	}
+}
+
 func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)

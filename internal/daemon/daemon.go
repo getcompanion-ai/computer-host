@@ -118,6 +118,20 @@ func (d *Daemon) Health(ctx context.Context) (*contracthost.HealthResponse, erro
 }
 
 func (d *Daemon) lockMachine(machineID contracthost.MachineID) func() {
+	lock := d.machineLock(machineID)
+	lock.Lock()
+	return lock.Unlock
+}
+
+func (d *Daemon) tryLockMachine(machineID contracthost.MachineID) (func(), bool) {
+	lock := d.machineLock(machineID)
+	if !lock.TryLock() {
+		return nil, false
+	}
+	return lock.Unlock, true
+}
+
+func (d *Daemon) machineLock(machineID contracthost.MachineID) *sync.Mutex {
 	d.locksMu.Lock()
 	lock, ok := d.machineLocks[machineID]
 	if !ok {
@@ -125,9 +139,7 @@ func (d *Daemon) lockMachine(machineID contracthost.MachineID) func() {
 		d.machineLocks[machineID] = lock
 	}
 	d.locksMu.Unlock()
-
-	lock.Lock()
-	return lock.Unlock
+	return lock
 }
 
 func (d *Daemon) lockArtifact(key string) func() {

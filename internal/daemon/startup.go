@@ -73,5 +73,12 @@ func (d *Daemon) completeMachineStartup(ctx context.Context, record *model.Machi
 	if err := d.store.UpdateMachine(ctx, *record); err != nil {
 		return nil, err
 	}
+	if err := d.ensureMachineRelays(ctx, record); err != nil {
+		return d.failMachineStartup(ctx, record, err.Error())
+	}
+	if err := d.ensurePublishedPortsForMachine(ctx, *record); err != nil {
+		d.stopMachineRelays(record.ID)
+		return d.failMachineStartup(ctx, record, err.Error())
+	}
 	return record, nil
 }
