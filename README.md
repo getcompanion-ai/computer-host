@@ -1,6 +1,6 @@
 ## computer-host
 
-<img width="3598" height="630" alt="Gemini_Generated_Image_d10lsxd10lsxd10l" src="https://github.com/user-attachments/assets/332ca256-2707-46af-b593-e5e3071a2263" />
+<img width=auto height=auto alt="Gemini_Generated_Image_d10lsxd10lsxd10l" src="https://github.com/user-attachments/assets/2f422d7e-0e17-4106-826a-0516f1edc828" />
 
 computer-host is a daemon runtime for managing Firecracker microVMs
 on bare-metal Linux hosts. It talks directly to the Firecracker HTTP
