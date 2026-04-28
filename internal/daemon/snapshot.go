@@ -273,6 +273,7 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		clearOperation = true
 		return nil, err
 	}
+	requestedMemoryMiB := resolveRequestedMemoryMiB(req.MemoryMiB)
 
 	// COW-copy system disk from snapshot to new machine's disk dir.
 	newSystemDiskPath := d.systemVolumePath(req.MachineID)
@@ -295,6 +296,15 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 		clearOperation = true
 		return nil, fmt.Errorf("copy system disk for restore: %w", err)
 	}
+	requestedStorageBytes, err := resolveRequestedStorageBytes(req.StorageBytes, systemDiskPath.LocalPath)
+	if err != nil {
+		clearOperation = true
+		return nil, err
+	}
+	if err := os.Truncate(newSystemDiskPath, requestedStorageBytes); err != nil {
+		clearOperation = true
+		return nil, fmt.Errorf("resize restored system disk for %q: %w", req.MachineID, err)
+	}
 	if err := d.injectMachineIdentity(ctx, newSystemDiskPath, req.MachineID); err != nil {
 		clearOperation = true
 		return nil, fmt.Errorf("inject machine identity for restore: %w", err)
@@ -309,25 +319,38 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 	}
 
 	type restoredUserVolume struct {
-		ID      contracthost.VolumeID
-		Path    string
-		DriveID string
+		ID                    contracthost.VolumeID
+		Path                  string
+		DriveID               string
+		Purpose               model.VolumePurpose
+		DeleteOnMachineDelete bool
 	}
 	restoredUserVolumes := make([]restoredUserVolume, 0)
 	restoredDrivePaths := make(map[string]string)
 	for _, restored := range orderedRestoredUserDiskArtifacts(restoredArtifacts) {
 		name := restored.Artifact.Name
 		driveID := strings.TrimSuffix(name, filepath.Ext(name))
+		purpose, deleteOnMachineDelete, err := detectVolumePurpose(ctx, restored.LocalPath)
+		if err != nil {
+			clearOperation = true
+			return nil, fmt.Errorf("detect volume purpose for restored drive %q: %w", driveID, err)
+		}
 		volumeID := contracthost.VolumeID(fmt.Sprintf("%s-%s", req.MachineID, driveID))
 		volumePath := filepath.Join(d.config.MachineDisksDir, string(req.MachineID), name)
+		if purpose == model.VolumePurposeWorkspace {
+			volumeID = d.workspaceVolumeID(req.MachineID)
+			volumePath = d.workspaceVolumePath(req.MachineID)
+		}
 		if err := cloneDiskFile(restored.LocalPath, volumePath, d.config.DiskCloneMode); err != nil {
 			clearOperation = true
 			return nil, fmt.Errorf("copy restored drive %q: %w", driveID, err)
 		}
 		restoredUserVolumes = append(restoredUserVolumes, restoredUserVolume{
-			ID:      volumeID,
-			Path:    volumePath,
-			DriveID: driveID,
+			ID:                    volumeID,
+			Path:                  volumePath,
+			DriveID:               driveID,
+			Purpose:               purpose,
+			DeleteOnMachineDelete: deleteOnMachineDelete,
 		})
 		restoredDrivePaths[driveID] = volumePath
 	}
@@ -335,12 +358,15 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 	userVolumes := make([]model.VolumeRecord, 0, len(restoredUserVolumes))
 	for _, volume := range restoredUserVolumes {
 		userVolumes = append(userVolumes, model.VolumeRecord{
-			ID:   volume.ID,
-			Kind: contracthost.VolumeKindUser,
-			Path: volume.Path,
+			ID:                    volume.ID,
+			Kind:                  contracthost.VolumeKindUser,
+			Path:                  volume.Path,
+			Pool:                  model.StoragePoolUserVolumes,
+			Purpose:               volume.Purpose,
+			DeleteOnMachineDelete: volume.DeleteOnMachineDelete,
 		})
 	}
-	spec, err := d.buildMachineSpec(req.MachineID, artifact, userVolumes, newSystemDiskPath, guestConfig, readyNonce)
+	spec, err := d.buildMachineSpec(req.MachineID, requestedMemoryMiB, artifact, userVolumes, newSystemDiskPath, guestConfig, readyNonce)
 	if err != nil {
 		clearOperation = true
 		return nil, fmt.Errorf("build machine spec for restore: %w", err)
@@ -375,13 +401,15 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 	restoredUserVolumeIDs := make([]contracthost.VolumeID, 0, len(restoredUserVolumes))
 	for _, volume := range restoredUserVolumes {
 		if err := d.store.CreateVolume(ctx, model.VolumeRecord{
-			ID:                volume.ID,
-			Kind:              contracthost.VolumeKindUser,
-			AttachedMachineID: machineIDPtr(req.MachineID),
-			SourceArtifact:    &req.Artifact,
-			Pool:              model.StoragePoolMachineDisks,
-			Path:              volume.Path,
-			CreatedAt:         now,
+			ID:                    volume.ID,
+			Kind:                  contracthost.VolumeKindUser,
+			AttachedMachineID:     machineIDPtr(req.MachineID),
+			SourceArtifact:        &req.Artifact,
+			Pool:                  model.StoragePoolUserVolumes,
+			Path:                  volume.Path,
+			Purpose:               volume.Purpose,
+			DeleteOnMachineDelete: volume.DeleteOnMachineDelete,
+			CreatedAt:             now,
 		}); err != nil {
 			for _, restoredVolumeID := range restoredUserVolumeIDs {
 				_ = d.store.DeleteVolume(context.Background(), restoredVolumeID)
@@ -397,6 +425,8 @@ func (d *Daemon) RestoreSnapshot(ctx context.Context, snapshotID contracthost.Sn
 	machineRecord := model.MachineRecord{
 		ID:                req.MachineID,
 		Artifact:          req.Artifact,
+		MemoryMiB:         requestedMemoryMiB,
+		StorageBytes:      requestedStorageBytes,
 		GuestConfig:       cloneGuestConfig(guestConfig),
 		SystemVolumeID:    systemVolumeID,
 		UserVolumeIDs:     restoredUserVolumeIDs,

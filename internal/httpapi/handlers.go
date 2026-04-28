@@ -15,7 +15,10 @@ type Service interface {
 	GetMachine(context.Context, contracthost.MachineID) (*contracthost.GetMachineResponse, error)
 	ListMachines(context.Context) (*contracthost.ListMachinesResponse, error)
 	StartMachine(context.Context, contracthost.MachineID) (*contracthost.GetMachineResponse, error)
+	ResizeMachine(context.Context, contracthost.MachineID, contracthost.ResizeMachineRequest) (*contracthost.ResizeMachineResponse, error)
 	EnsureExecRelay(context.Context, contracthost.MachineID) (*contracthost.GetMachineResponse, error)
+	ExecCommand(context.Context, contracthost.MachineID, contracthost.ExecRequest) (*contracthost.ExecResponse, error)
+	FileOperation(context.Context, contracthost.MachineID, contracthost.FileOperationRequest) (*contracthost.FileOperationResponse, error)
 	StopMachine(context.Context, contracthost.MachineID) error
 	DeleteMachine(context.Context, contracthost.MachineID) error
 	Health(context.Context) (*contracthost.HealthResponse, error)
@@ -30,6 +33,9 @@ type Service interface {
 	CreatePublishedPort(context.Context, contracthost.MachineID, contracthost.CreatePublishedPortRequest) (*contracthost.CreatePublishedPortResponse, error)
 	ListPublishedPorts(context.Context, contracthost.MachineID) (*contracthost.ListPublishedPortsResponse, error)
 	DeletePublishedPort(context.Context, contracthost.MachineID, contracthost.PublishedPortID) error
+	CreateMount(context.Context, contracthost.MachineID, contracthost.CreateMountRequest) (*contracthost.CreateMountResponse, error)
+	ListMounts(context.Context, contracthost.MachineID) (*contracthost.ListMountsResponse, error)
+	DeleteMount(context.Context, contracthost.MachineID, contracthost.MountID) error
 }
 
 type SnapshotArtifactContent struct {
@@ -167,6 +173,63 @@ func (h *Handler) handleMachine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "resize" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		var request contracthost.ResizeMachineRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		response, err := h.service.ResizeMachine(r.Context(), machineID, request)
+		if err != nil {
+			writeError(w, statusForError(err), err)
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "exec" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		var request contracthost.ExecRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		response, err := h.service.ExecCommand(r.Context(), machineID, request)
+		if err != nil {
+			writeError(w, statusForError(err), err)
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+
+	if len(parts) == 3 && parts[1] == "files" && parts[2] == "ops" {
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w)
+			return
+		}
+		var request contracthost.FileOperationRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		response, err := h.service.FileOperation(r.Context(), machineID, request)
+		if err != nil {
+			writeError(w, statusForError(err), err)
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+
 	if len(parts) == 2 && parts[1] == "exec-relay" {
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w)
@@ -241,6 +304,46 @@ func (h *Handler) handleMachine(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := h.service.DeletePublishedPort(r.Context(), machineID, contracthost.PublishedPortID(parts[2])); err != nil {
+			writeError(w, statusForError(err), err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "mounts" {
+		switch r.Method {
+		case http.MethodGet:
+			response, err := h.service.ListMounts(r.Context(), machineID)
+			if err != nil {
+				writeError(w, statusForError(err), err)
+				return
+			}
+			writeJSON(w, http.StatusOK, response)
+		case http.MethodPost:
+			var request contracthost.CreateMountRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			response, err := h.service.CreateMount(r.Context(), machineID, request)
+			if err != nil {
+				writeError(w, statusForError(err), err)
+				return
+			}
+			writeJSON(w, http.StatusCreated, response)
+		default:
+			writeMethodNotAllowed(w)
+		}
+		return
+	}
+
+	if len(parts) == 3 && parts[1] == "mounts" {
+		if r.Method != http.MethodDelete {
+			writeMethodNotAllowed(w)
+			return
+		}
+		if err := h.service.DeleteMount(r.Context(), machineID, contracthost.MountID(parts[2])); err != nil {
 			writeError(w, statusForError(err), err)
 			return
 		}

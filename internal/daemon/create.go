@@ -56,10 +56,10 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	}()
 
 	var (
-		artifact     *model.ArtifactRecord
-		userVolumes  []model.VolumeRecord
-		guestHostKey *guestSSHHostKeyPair
-		readyNonce   string
+		artifact            *model.ArtifactRecord
+		externalUserVolumes []model.VolumeRecord
+		guestHostKey        *guestSSHHostKeyPair
+		readyNonce          string
 	)
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() error {
@@ -69,7 +69,7 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	})
 	group.Go(func() error {
 		var err error
-		userVolumes, err = d.loadAttachableUserVolumes(groupCtx, req.MachineID, req.UserVolumeIDs)
+		externalUserVolumes, err = d.loadAttachableUserVolumes(groupCtx, req.MachineID, req.UserVolumeIDs)
 		return err
 	})
 	group.Go(func() error {
@@ -83,6 +83,11 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 		return err
 	})
 	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	requestedMemoryMiB := resolveRequestedMemoryMiB(req.MemoryMiB)
+	requestedStorageBytes, err := resolveRequestedStorageBytes(req.StorageBytes, artifact.RootFSPath)
+	if err != nil {
 		return nil, err
 	}
 
@@ -101,7 +106,7 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 		_ = os.Remove(systemVolumePath)
 		_ = os.RemoveAll(filepath.Dir(systemVolumePath))
 	}()
-	if err := os.Truncate(systemVolumePath, defaultGuestDiskSizeBytes); err != nil {
+	if err := os.Truncate(systemVolumePath, requestedStorageBytes); err != nil {
 		return nil, fmt.Errorf("expand system volume for %q: %w", req.MachineID, err)
 	}
 	if err := d.injectMachineIdentity(ctx, systemVolumePath, req.MachineID); err != nil {
@@ -110,11 +115,20 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	if err := d.injectGuestConfig(ctx, systemVolumePath, guestConfig); err != nil {
 		return nil, fmt.Errorf("inject guest config for %q: %w", req.MachineID, err)
 	}
+	if err := d.ensureOfflineWorkspaceRoot(ctx, systemVolumePath); err != nil {
+		return nil, fmt.Errorf("prepare workspace root for %q: %w", req.MachineID, err)
+	}
 	if err := injectGuestSSHHostKey(ctx, systemVolumePath, guestHostKey); err != nil {
 		return nil, fmt.Errorf("inject guest ssh host key for %q: %w", req.MachineID, err)
 	}
 
-	spec, err := d.buildMachineSpec(req.MachineID, artifact, userVolumes, systemVolumePath, guestConfig, readyNonce)
+	workspaceVolume, err := d.createWorkspaceVolume(ctx, req.MachineID, requestedStorageBytes)
+	if err != nil {
+		return nil, fmt.Errorf("create workspace volume for %q: %w", req.MachineID, err)
+	}
+	userVolumes := append([]model.VolumeRecord{workspaceVolume}, externalUserVolumes...)
+
+	spec, err := d.buildMachineSpec(req.MachineID, requestedMemoryMiB, artifact, userVolumes, systemVolumePath, guestConfig, readyNonce)
 	if err != nil {
 		return nil, err
 	}
@@ -143,13 +157,26 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 		return nil, err
 	}
 
+	if err := d.store.CreateVolume(ctx, workspaceVolume); err != nil {
+		_ = os.Remove(workspaceVolume.Path)
+		_ = d.store.DeleteVolume(context.Background(), systemVolumeRecord.ID)
+		_ = d.runtime.Delete(context.Background(), *state)
+		return nil, err
+	}
+
 	attachedUserVolumeIDs := make([]contracthost.VolumeID, 0, len(userVolumes))
-	for _, volume := range userVolumes {
+	attachedUserVolumeIDs = append(attachedUserVolumeIDs, workspaceVolume.ID)
+	for _, volume := range externalUserVolumes {
 		volume.AttachedMachineID = machineIDPtr(req.MachineID)
 		if err := d.store.UpdateVolume(ctx, volume); err != nil {
 			for _, attachedVolumeID := range attachedUserVolumeIDs {
 				attachedVolume, getErr := d.store.GetVolume(context.Background(), attachedVolumeID)
 				if getErr == nil {
+					if attachedVolume.DeleteOnMachineDelete {
+						_ = os.Remove(attachedVolume.Path)
+						_ = d.store.DeleteVolume(context.Background(), attachedVolumeID)
+						continue
+					}
 					attachedVolume.AttachedMachineID = nil
 					_ = d.store.UpdateVolume(context.Background(), *attachedVolume)
 				}
@@ -164,6 +191,8 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	record := model.MachineRecord{
 		ID:                req.MachineID,
 		Artifact:          req.Artifact,
+		MemoryMiB:         requestedMemoryMiB,
+		StorageBytes:      requestedStorageBytes,
 		GuestConfig:       cloneGuestConfig(guestConfig),
 		SystemVolumeID:    systemVolumeRecord.ID,
 		UserVolumeIDs:     append([]contracthost.VolumeID(nil), attachedUserVolumeIDs...),
@@ -179,10 +208,12 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 		StartedAt:         state.StartedAt,
 	}
 	if err := d.store.CreateMachine(ctx, record); err != nil {
-		for _, volume := range userVolumes {
+		for _, volume := range externalUserVolumes {
 			volume.AttachedMachineID = nil
 			_ = d.store.UpdateVolume(context.Background(), volume)
 		}
+		_ = os.Remove(workspaceVolume.Path)
+		_ = d.store.DeleteVolume(context.Background(), workspaceVolume.ID)
 		_ = d.store.DeleteVolume(context.Background(), systemVolumeRecord.ID)
 		_ = d.runtime.Delete(context.Background(), *state)
 		return nil, err
@@ -198,7 +229,7 @@ func (d *Daemon) CreateMachine(ctx context.Context, req contracthost.CreateMachi
 	return &contracthost.CreateMachineResponse{Machine: machineToContract(*recordReady)}, nil
 }
 
-func (d *Daemon) buildMachineSpec(machineID contracthost.MachineID, artifact *model.ArtifactRecord, userVolumes []model.VolumeRecord, systemVolumePath string, guestConfig *contracthost.GuestConfig, readyNonce string) (firecracker.MachineSpec, error) {
+func (d *Daemon) buildMachineSpec(machineID contracthost.MachineID, memoryMiB int64, artifact *model.ArtifactRecord, userVolumes []model.VolumeRecord, systemVolumePath string, guestConfig *contracthost.GuestConfig, readyNonce string) (firecracker.MachineSpec, error) {
 	drives := make([]firecracker.DriveSpec, 0, len(userVolumes))
 	for i, volume := range userVolumes {
 		drives = append(drives, firecracker.DriveSpec{
@@ -217,7 +248,7 @@ func (d *Daemon) buildMachineSpec(machineID contracthost.MachineID, artifact *mo
 	spec := firecracker.MachineSpec{
 		ID:              firecracker.MachineID(machineID),
 		VCPUs:           defaultGuestVCPUs,
-		MemoryMiB:       defaultGuestMemoryMiB,
+		MemoryMiB:       resolveRequestedMemoryMiB(memoryMiB),
 		KernelImagePath: artifact.KernelImagePath,
 		RootFSPath:      systemVolumePath,
 		RootDrive: firecracker.DriveSpec{
@@ -235,6 +266,27 @@ func (d *Daemon) buildMachineSpec(machineID contracthost.MachineID, artifact *mo
 		return firecracker.MachineSpec{}, err
 	}
 	return spec, nil
+}
+
+func resolveRequestedMemoryMiB(memoryMiB int64) int64 {
+	if memoryMiB <= 0 {
+		return defaultGuestMemoryMiB
+	}
+	return memoryMiB
+}
+
+func resolveRequestedStorageBytes(storageBytes int64, sourceDiskPath string) (int64, error) {
+	if storageBytes <= 0 {
+		storageBytes = defaultGuestDiskSizeBytes
+	}
+	sourceInfo, err := os.Stat(sourceDiskPath)
+	if err != nil {
+		return 0, fmt.Errorf("stat source disk %q: %w", sourceDiskPath, err)
+	}
+	if storageBytes < sourceInfo.Size() {
+		return 0, fmt.Errorf("requested storage %d bytes is smaller than source disk %d bytes", storageBytes, sourceInfo.Size())
+	}
+	return storageBytes, nil
 }
 
 func (d *Daemon) ensureArtifact(ctx context.Context, ref contracthost.ArtifactRef) (*model.ArtifactRecord, error) {

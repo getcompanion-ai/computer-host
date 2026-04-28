@@ -28,6 +28,7 @@ type persistedState struct {
 	Volumes        []model.VolumeRecord        `json:"volumes"`
 	Snapshots      []model.SnapshotRecord      `json:"snapshots"`
 	PublishedPorts []model.PublishedPortRecord `json:"published_ports"`
+	Mounts         []model.MountRecord        `json:"mounts"`
 }
 
 func NewFileStore(statePath string, operationsPath string) (*FileStore, error) {
@@ -422,6 +423,86 @@ func (s *FileStore) DeletePublishedPort(_ context.Context, id contracthost.Publi
 	})
 }
 
+func (s *FileStore) CreateMount(_ context.Context, record model.MountRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.updateState(func(state *persistedState) error {
+		for _, mount := range state.Mounts {
+			if mount.ID == record.ID {
+				return fmt.Errorf("store: mount %q already exists", record.ID)
+			}
+		}
+		state.Mounts = append(state.Mounts, record)
+		return nil
+	})
+}
+
+func (s *FileStore) GetMount(_ context.Context, id contracthost.MountID) (*model.MountRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state, err := s.readState()
+	if err != nil {
+		return nil, err
+	}
+	for i := range state.Mounts {
+		if state.Mounts[i].ID == id {
+			record := state.Mounts[i]
+			return &record, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (s *FileStore) ListMounts(_ context.Context, machineID contracthost.MachineID) ([]model.MountRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state, err := s.readState()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]model.MountRecord, 0, len(state.Mounts))
+	for _, mount := range state.Mounts {
+		if machineID != "" && mount.MachineID != machineID {
+			continue
+		}
+		result = append(result, mount)
+	}
+	return result, nil
+}
+
+func (s *FileStore) UpdateMount(_ context.Context, record model.MountRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.updateState(func(state *persistedState) error {
+		for i := range state.Mounts {
+			if state.Mounts[i].ID == record.ID {
+				state.Mounts[i] = record
+				return nil
+			}
+		}
+		return ErrNotFound
+	})
+}
+
+func (s *FileStore) DeleteMount(_ context.Context, id contracthost.MountID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.updateState(func(state *persistedState) error {
+		for i := range state.Mounts {
+			if state.Mounts[i].ID == id {
+				state.Mounts = append(state.Mounts[:i], state.Mounts[i+1:]...)
+				return nil
+			}
+		}
+		return ErrNotFound
+	})
+}
+
 func (s *FileStore) readOperations() (*persistedOperations, error) {
 	var operations persistedOperations
 	if err := readJSONFile(s.operationsPath, &operations); err != nil {
@@ -537,6 +618,7 @@ func emptyPersistedState() persistedState {
 		Volumes:        []model.VolumeRecord{},
 		Snapshots:      []model.SnapshotRecord{},
 		PublishedPorts: []model.PublishedPortRecord{},
+		Mounts:         []model.MountRecord{},
 	}
 }
 
@@ -559,6 +641,9 @@ func normalizeState(state *persistedState) {
 	}
 	if state.PublishedPorts == nil {
 		state.PublishedPorts = []model.PublishedPortRecord{}
+	}
+	if state.Mounts == nil {
+		state.Mounts = []model.MountRecord{}
 	}
 }
 

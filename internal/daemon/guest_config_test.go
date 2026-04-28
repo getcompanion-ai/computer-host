@@ -73,8 +73,8 @@ func TestInjectMachineIdentityWritesHostnameFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read machine-name: %v", err)
 	}
-	if machineName != "kiruru\n" {
-		t.Fatalf("machine-name mismatch: got %q want %q", machineName, "kiruru\n")
+	if machineName != "agentcomputer\n" {
+		t.Fatalf("machine-name mismatch: got %q want %q", machineName, "agentcomputer\n")
 	}
 
 	hostname, err := readExt4File(imagePath, "/etc/hostname")

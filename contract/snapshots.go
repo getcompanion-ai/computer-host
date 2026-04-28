@@ -83,6 +83,8 @@ type UploadSnapshotResponse struct {
 type RestoreSnapshotRequest struct {
 	MachineID     MachineID            `json:"machine_id"`
 	Artifact      ArtifactRef          `json:"artifact"`
+	MemoryMiB     int64                `json:"memory_mib,omitempty"`
+	StorageBytes  int64                `json:"storage_bytes,omitempty"`
 	LocalSnapshot *LocalSnapshotSpec   `json:"local_snapshot,omitempty"`
 	Snapshot      *DurableSnapshotSpec `json:"snapshot,omitempty"`
 	GuestConfig   *GuestConfig         `json:"guest_config,omitempty"`

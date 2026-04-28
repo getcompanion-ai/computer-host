@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,10 +15,12 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
 	"github.com/getcompanion-ai/computer-host/internal/firecracker"
 	"github.com/getcompanion-ai/computer-host/internal/model"
+	"github.com/getcompanion-ai/computer-host/internal/store"
 	contracthost "github.com/getcompanion-ai/computer-host/contract"
 )
 
@@ -27,6 +30,16 @@ func (d *Daemon) systemVolumeID(machineID contracthost.MachineID) contracthost.V
 
 func (d *Daemon) systemVolumePath(machineID contracthost.MachineID) string {
 	return filepath.Join(d.config.MachineDisksDir, string(machineID), "system.img")
+}
+
+const workspaceVolumeLabel = "microagent-ws"
+
+func (d *Daemon) workspaceVolumeID(machineID contracthost.MachineID) contracthost.VolumeID {
+	return contracthost.VolumeID(fmt.Sprintf("%s-workspace", machineID))
+}
+
+func (d *Daemon) workspaceVolumePath(machineID contracthost.MachineID) string {
+	return filepath.Join(d.config.MachineDisksDir, string(machineID), "workspace.img")
 }
 
 func (d *Daemon) machineRuntimeBaseDir(machineID contracthost.MachineID) string {
@@ -106,6 +119,123 @@ func cloneDiskFile(source string, target string, mode appconfig.DiskCloneMode) e
 	default:
 		return fmt.Errorf("unsupported disk clone mode %q", mode)
 	}
+}
+
+func createExt4VolumeImage(ctx context.Context, path string, sizeBytes int64, label string) error {
+	if sizeBytes <= 0 {
+		return fmt.Errorf("ext4 volume size must be greater than zero")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create volume dir for %q: %w", path, err)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove existing volume %q: %w", path, err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("create volume file %q: %w", path, err)
+	}
+	if err := file.Truncate(sizeBytes); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("truncate volume file %q: %w", path, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close volume file %q: %w", path, err)
+	}
+
+	args := []string{"-q", "-F"}
+	if strings.TrimSpace(label) != "" {
+		args = append(args, "-L", label)
+	}
+	args = append(args, path)
+	command := exec.CommandContext(ctx, "mkfs.ext4", args...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mkfs.ext4 %q: %w: %s", path, err, strings.TrimSpace(string(output)))
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+func volumeLabel(ctx context.Context, path string) (string, error) {
+	command := exec.CommandContext(ctx, "blkid", "-o", "value", "-s", "LABEL", path)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
+			return "", nil
+		}
+		return "", fmt.Errorf("blkid label for %q: %w: %s", path, err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func detectVolumePurpose(ctx context.Context, path string) (model.VolumePurpose, bool, error) {
+	label, err := volumeLabel(ctx, path)
+	if err != nil {
+		return "", false, err
+	}
+	switch label {
+	case workspaceVolumeLabel:
+		return model.VolumePurposeWorkspace, true, nil
+	default:
+		return "", false, nil
+	}
+}
+
+func (d *Daemon) createWorkspaceVolume(ctx context.Context, machineID contracthost.MachineID, sizeBytes int64) (model.VolumeRecord, error) {
+	path := d.workspaceVolumePath(machineID)
+	if err := createExt4VolumeImage(ctx, path, sizeBytes, workspaceVolumeLabel); err != nil {
+		return model.VolumeRecord{}, err
+	}
+	if err := d.ensureOfflineWorkspaceRoot(ctx, path); err != nil {
+		_ = os.Remove(path)
+		return model.VolumeRecord{}, fmt.Errorf("prepare workspace volume %q: %w", machineID, err)
+	}
+	now := time.Now().UTC()
+	return model.VolumeRecord{
+		ID:                    d.workspaceVolumeID(machineID),
+		Kind:                  contracthost.VolumeKindUser,
+		AttachedMachineID:     machineIDPtr(machineID),
+		Pool:                  model.StoragePoolUserVolumes,
+		Path:                  path,
+		Purpose:               model.VolumePurposeWorkspace,
+		DeleteOnMachineDelete: true,
+		CreatedAt:             now,
+	}, nil
+}
+
+func (d *Daemon) workspaceVolumeForMachine(ctx context.Context, record model.MachineRecord) (*model.VolumeRecord, error) {
+	volumes := make([]*model.VolumeRecord, 0, len(record.UserVolumeIDs))
+	for _, volumeID := range record.UserVolumeIDs {
+		volume, err := d.store.GetVolume(ctx, volumeID)
+		if err != nil {
+			return nil, err
+		}
+		volumes = append(volumes, volume)
+		if volume.Purpose == model.VolumePurposeWorkspace {
+			return volume, nil
+		}
+	}
+
+	for _, volume := range volumes {
+		purpose, deleteOnMachineDelete, err := detectVolumePurpose(ctx, volume.Path)
+		if err != nil {
+			return nil, err
+		}
+		if purpose != model.VolumePurposeWorkspace {
+			continue
+		}
+		if volume.Purpose != purpose || volume.DeleteOnMachineDelete != deleteOnMachineDelete {
+			volume.Purpose = purpose
+			volume.DeleteOnMachineDelete = deleteOnMachineDelete
+			if err := d.store.UpdateVolume(ctx, *volume); err != nil {
+				return nil, err
+			}
+		}
+		return volume, nil
+	}
+
+	return nil, store.ErrNotFound
 }
 
 func validateDiskCloneBackend(cfg appconfig.Config) error {
@@ -581,12 +711,14 @@ func replaceExt4File(ctx context.Context, imagePath string, sourcePath string, t
 }
 
 func replaceExt4FileMode(ctx context.Context, imagePath string, sourcePath string, targetPath string, mode string) error {
-	_ = runDebugFS(ctx, imagePath, fmt.Sprintf("rm %s", targetPath))
-	if err := runDebugFS(ctx, imagePath, fmt.Sprintf("write %s %s", sourcePath, targetPath)); err != nil {
+	quotedSource := debugFSQuote(sourcePath)
+	quotedTarget := debugFSQuote(targetPath)
+	_ = runDebugFS(ctx, imagePath, fmt.Sprintf("rm %s", quotedTarget))
+	if err := runDebugFS(ctx, imagePath, fmt.Sprintf("write %s %s", quotedSource, quotedTarget)); err != nil {
 		return fmt.Errorf("inject %q into %q: %w", targetPath, imagePath, err)
 	}
 	if mode != "" {
-		if err := runDebugFS(ctx, imagePath, fmt.Sprintf("set_inode_field %s mode 0%s", targetPath, mode)); err != nil {
+		if err := runDebugFS(ctx, imagePath, fmt.Sprintf("set_inode_field %s mode 0%s", quotedTarget, mode)); err != nil {
 			return fmt.Errorf("set mode on %q in %q: %w", targetPath, imagePath, err)
 		}
 	}

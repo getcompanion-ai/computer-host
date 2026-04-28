@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	defaultGuestKernelArgs      = "console=ttyS0 reboot=k panic=0"
+	defaultGuestKernelArgs      = "console=ttyS0 reboot=k panic=1 loglevel=1 random.trust_cpu=on tsc=reliable i8042.nokbd i8042.noaux"
 	defaultGuestKernelArgsNoPCI = defaultGuestKernelArgs + " pci=off"
 	defaultGuestMemoryMiB       = int64(3072)
 	defaultGuestVCPUs           = int64(2)

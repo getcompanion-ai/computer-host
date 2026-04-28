@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"net"
+	"net/http"
 	"testing"
 
 	"github.com/getcompanion-ai/computer-host/internal/model"
@@ -81,5 +82,28 @@ func TestEnsureExecRelayAllocatesRelayLazily(t *testing.T) {
 	}
 	if !hasStoredExecPort {
 		t.Fatalf("stored machine missing exec relay port: %#v", stored.Ports)
+	}
+}
+
+func TestApplyGuestdUserAuthUsesBasicAuth(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "http://127.0.0.1/process.Process/Start", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	applyGuestdUserAuth(req, "root")
+
+	username, password, ok := req.BasicAuth()
+	if !ok {
+		t.Fatal("expected basic auth to be set")
+	}
+	if username != "root" {
+		t.Fatalf("basic auth username = %q, want root", username)
+	}
+	if password != "" {
+		t.Fatalf("basic auth password = %q, want empty", password)
+	}
+	if got := req.Header.Get("X-Username"); got != "root" {
+		t.Fatalf("X-Username = %q, want root", got)
 	}
 }

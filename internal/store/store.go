@@ -36,4 +36,9 @@ type Store interface {
 	GetPublishedPort(context.Context, contracthost.PublishedPortID) (*model.PublishedPortRecord, error)
 	ListPublishedPorts(context.Context, contracthost.MachineID) ([]model.PublishedPortRecord, error)
 	DeletePublishedPort(context.Context, contracthost.PublishedPortID) error
+	CreateMount(context.Context, model.MountRecord) error
+	GetMount(context.Context, contracthost.MountID) (*model.MountRecord, error)
+	ListMounts(context.Context, contracthost.MachineID) ([]model.MountRecord, error)
+	UpdateMount(context.Context, model.MountRecord) error
+	DeleteMount(context.Context, contracthost.MountID) error
 }

@@ -401,6 +401,7 @@ func TestStartMachineTransitionsToRunningWithHandshake(t *testing.T) {
 	if err := baseStore.CreateMachine(context.Background(), model.MachineRecord{
 		ID:             "vm-start",
 		Artifact:       artifactRef,
+		MemoryMiB:      2048,
 		SystemVolumeID: "vm-start-system",
 		Ports:          defaultMachinePorts(),
 		Phase:          contracthost.MachinePhaseStopped,
@@ -415,6 +416,9 @@ func TestStartMachineTransitionsToRunningWithHandshake(t *testing.T) {
 	}
 	if response.Machine.Phase != contracthost.MachinePhaseRunning {
 		t.Fatalf("response machine phase = %q, want %q", response.Machine.Phase, contracthost.MachinePhaseRunning)
+	}
+	if runtime.lastSpec.MemoryMiB != 2048 {
+		t.Fatalf("runtime memory = %d, want 2048", runtime.lastSpec.MemoryMiB)
 	}
 
 	machine, err := baseStore.GetMachine(context.Background(), "vm-start")

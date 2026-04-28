@@ -137,6 +137,8 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 			KernelImageURL: server.URL + "/kernel",
 			RootFSURL:      server.URL + "/rootfs",
 		},
+		MemoryMiB:    4096,
+		StorageBytes: int64(12 * 1024 * 1024 * 1024),
 		GuestConfig: &contracthost.GuestConfig{
 			Hostname: "workbox",
 			AuthorizedKeys: []string{
@@ -167,14 +169,19 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	if runtime.bootCalls != 1 {
 		t.Fatalf("boot call count mismatch: got %d want 1", runtime.bootCalls)
 	}
+	if runtime.lastSpec.MemoryMiB != 4096 {
+		t.Fatalf("runtime memory mismatch: got %d want 4096", runtime.lastSpec.MemoryMiB)
+	}
 	if runtime.lastSpec.KernelImagePath == "" || runtime.lastSpec.RootFSPath == "" {
 		t.Fatalf("runtime spec paths not populated: %#v", runtime.lastSpec)
 	}
 	if _, err := os.Stat(runtime.lastSpec.KernelImagePath); err != nil {
 		t.Fatalf("kernel artifact not staged: %v", err)
 	}
-	if _, err := os.Stat(runtime.lastSpec.RootFSPath); err != nil {
+	if info, err := os.Stat(runtime.lastSpec.RootFSPath); err != nil {
 		t.Fatalf("system disk not staged: %v", err)
+	} else if info.Size() != 12*1024*1024*1024 {
+		t.Fatalf("system disk size mismatch: got %d want %d", info.Size(), int64(12*1024*1024*1024))
 	}
 	hostAuthorizedKeyBytes, err := os.ReadFile(hostDaemon.backendSSHPublicKeyPath())
 	if err != nil {
@@ -233,6 +240,12 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	if machine.Phase != contracthost.MachinePhaseRunning {
 		t.Fatalf("stored machine phase mismatch: got %q", machine.Phase)
 	}
+	if machine.MemoryMiB != 4096 {
+		t.Fatalf("stored memory mismatch: got %d want 4096", machine.MemoryMiB)
+	}
+	if machine.StorageBytes != 12*1024*1024*1024 {
+		t.Fatalf("stored storage mismatch: got %d want %d", machine.StorageBytes, int64(12*1024*1024*1024))
+	}
 	if machine.GuestConfig == nil || len(machine.GuestConfig.AuthorizedKeys) == 0 {
 		t.Fatalf("stored guest config missing authorized keys: %#v", machine.GuestConfig)
 	}
@@ -240,8 +253,8 @@ func TestCreateMachineStagesArtifactsAndPersistsState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read injected machine-name: %v", err)
 	}
-	if machineName != "vm-1\n" {
-		t.Fatalf("machine-name mismatch: got %q want %q", machineName, "vm-1\n")
+	if machineName != "agentcomputer\n" {
+		t.Fatalf("machine-name mismatch: got %q want %q", machineName, "agentcomputer\n")
 	}
 	injectedAuthorizedKeys, err := readExt4File(runtime.lastSpec.RootFSPath, "/etc/microagent/authorized_keys")
 	if err != nil {
@@ -302,6 +315,43 @@ func TestCreateMachineCleansSystemVolumeOnInjectFailure(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Dir(systemVolumePath)); !os.IsNotExist(statErr) {
 		t.Fatalf("system volume dir should be cleaned up, stat err = %v", statErr)
+	}
+}
+
+func TestResolveRequestedMemoryMiBFallsBackToLegacyDefault(t *testing.T) {
+	if got := resolveRequestedMemoryMiB(0); got != defaultGuestMemoryMiB {
+		t.Fatalf("resolveRequestedMemoryMiB(0) = %d, want %d", got, defaultGuestMemoryMiB)
+	}
+	if got := resolveRequestedMemoryMiB(2048); got != 2048 {
+		t.Fatalf("resolveRequestedMemoryMiB(2048) = %d, want 2048", got)
+	}
+}
+
+func TestResolveRequestedStorageBytesValidatesAgainstSourceDisk(t *testing.T) {
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "rootfs.img")
+	if err := os.WriteFile(sourcePath, []byte("payload"), 0o644); err != nil {
+		t.Fatalf("write source disk: %v", err)
+	}
+
+	resolved, err := resolveRequestedStorageBytes(0, sourcePath)
+	if err != nil {
+		t.Fatalf("resolveRequestedStorageBytes default returned error: %v", err)
+	}
+	if resolved != defaultGuestDiskSizeBytes {
+		t.Fatalf("default requested storage = %d, want %d", resolved, defaultGuestDiskSizeBytes)
+	}
+
+	if _, err := resolveRequestedStorageBytes(3, sourcePath); err == nil {
+		t.Fatal("expected smaller-than-source storage to fail")
+	}
+
+	resolved, err = resolveRequestedStorageBytes(16, sourcePath)
+	if err != nil {
+		t.Fatalf("resolveRequestedStorageBytes explicit returned error: %v", err)
+	}
+	if resolved != 16 {
+		t.Fatalf("explicit requested storage = %d, want 16", resolved)
 	}
 }
 
@@ -376,6 +426,232 @@ func TestStopMachineSyncsGuestFilesystemBeforeDelete(t *testing.T) {
 	}
 	if stopped.RuntimeHost != "" {
 		t.Fatalf("runtime host should be cleared after stop, got %q", stopped.RuntimeHost)
+	}
+}
+
+func TestResizeMachineStopsAndExpandsSystemVolume(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	runtime := &fakeRuntime{}
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+	hostDaemon.syncGuestFilesystem = func(context.Context, string) error {
+		return nil
+	}
+	hostDaemon.shutdownGuest = func(context.Context, string) error {
+		runtime.inspectOverride = func(state firecracker.MachineState) (*firecracker.MachineState, error) {
+			state.Phase = firecracker.PhaseStopped
+			state.PID = 0
+			return &state, nil
+		}
+		return nil
+	}
+
+	systemVolumePath := filepath.Join(root, "machine-disks", "vm-resize", "rootfs.ext4")
+	if err := os.MkdirAll(filepath.Dir(systemVolumePath), 0o755); err != nil {
+		t.Fatalf("create system volume dir: %v", err)
+	}
+	currentStorageBytes := int64(5 << 20)
+	nextStorageBytes := int64(8 << 20)
+	if err := os.WriteFile(systemVolumePath, []byte("disk"), 0o644); err != nil {
+		t.Fatalf("write system volume: %v", err)
+	}
+	if err := os.Truncate(systemVolumePath, currentStorageBytes); err != nil {
+		t.Fatalf("size system volume: %v", err)
+	}
+
+	now := time.Now().UTC()
+	if err := fileStore.CreateVolume(context.Background(), model.VolumeRecord{
+		ID:        "vm-resize-system",
+		Kind:      contracthost.VolumeKindSystem,
+		Pool:      model.StoragePoolMachineDisks,
+		Path:      systemVolumePath,
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("create system volume record: %v", err)
+	}
+	if err := fileStore.CreateMachine(context.Background(), model.MachineRecord{
+		ID:             "vm-resize",
+		MemoryMiB:      2048,
+		StorageBytes:   currentStorageBytes,
+		SystemVolumeID: "vm-resize-system",
+		RuntimeHost:    "172.16.0.3",
+		TapDevice:      "fctap-resize",
+		Phase:          contracthost.MachinePhaseRunning,
+		PID:            2345,
+		SocketPath:     filepath.Join(root, "runtime", "vm-resize.sock"),
+		Ports:          defaultMachinePorts(),
+		CreatedAt:      now,
+		StartedAt:      &now,
+	}); err != nil {
+		t.Fatalf("create machine: %v", err)
+	}
+
+	response, err := hostDaemon.ResizeMachine(context.Background(), "vm-resize", contracthost.ResizeMachineRequest{
+		MemoryMiB:    4096,
+		StorageBytes: nextStorageBytes,
+	})
+	if err != nil {
+		t.Fatalf("resize machine: %v", err)
+	}
+	if response.Machine.Phase != contracthost.MachinePhaseStopped {
+		t.Fatalf("response phase = %q, want stopped", response.Machine.Phase)
+	}
+	if len(runtime.deleteCalls) != 1 {
+		t.Fatalf("runtime delete call count = %d, want 1", len(runtime.deleteCalls))
+	}
+
+	resized, err := fileStore.GetMachine(context.Background(), "vm-resize")
+	if err != nil {
+		t.Fatalf("get resized machine: %v", err)
+	}
+	if resized.MemoryMiB != 4096 {
+		t.Fatalf("memory = %d, want 4096", resized.MemoryMiB)
+	}
+	if resized.StorageBytes != nextStorageBytes {
+		t.Fatalf("storage = %d, want %d", resized.StorageBytes, nextStorageBytes)
+	}
+	if resized.RuntimeHost != "" {
+		t.Fatalf("runtime host should be cleared after resize, got %q", resized.RuntimeHost)
+	}
+	info, err := os.Stat(systemVolumePath)
+	if err != nil {
+		t.Fatalf("stat system volume: %v", err)
+	}
+	if info.Size() != nextStorageBytes {
+		t.Fatalf("system volume size = %d, want %d", info.Size(), nextStorageBytes)
+	}
+	operations, err := fileStore.ListOperations(context.Background())
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(operations) != 0 {
+		t.Fatalf("operations left behind: %#v", operations)
+	}
+}
+
+func TestResizeMachineOmittedMemoryPreservesCurrentMemory(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	hostDaemon, err := New(cfg, fileStore, &fakeRuntime{})
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+
+	systemVolumePath := filepath.Join(root, "machine-disks", "vm-resize-storage-only", "rootfs.ext4")
+	if err := os.MkdirAll(filepath.Dir(systemVolumePath), 0o755); err != nil {
+		t.Fatalf("create system volume dir: %v", err)
+	}
+	currentStorageBytes := int64(5 << 20)
+	nextStorageBytes := int64(8 << 20)
+	if err := os.WriteFile(systemVolumePath, []byte("disk"), 0o644); err != nil {
+		t.Fatalf("write system volume: %v", err)
+	}
+	if err := os.Truncate(systemVolumePath, currentStorageBytes); err != nil {
+		t.Fatalf("size system volume: %v", err)
+	}
+
+	now := time.Now().UTC()
+	if err := fileStore.CreateVolume(context.Background(), model.VolumeRecord{
+		ID:        "vm-resize-storage-only-system",
+		Kind:      contracthost.VolumeKindSystem,
+		Pool:      model.StoragePoolMachineDisks,
+		Path:      systemVolumePath,
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("create system volume record: %v", err)
+	}
+	if err := fileStore.CreateMachine(context.Background(), model.MachineRecord{
+		ID:             "vm-resize-storage-only",
+		MemoryMiB:      8192,
+		StorageBytes:   currentStorageBytes,
+		SystemVolumeID: "vm-resize-storage-only-system",
+		Phase:          contracthost.MachinePhaseStopped,
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatalf("create machine: %v", err)
+	}
+
+	if _, err := hostDaemon.ResizeMachine(context.Background(), "vm-resize-storage-only", contracthost.ResizeMachineRequest{
+		StorageBytes: nextStorageBytes,
+	}); err != nil {
+		t.Fatalf("resize machine: %v", err)
+	}
+
+	resized, err := fileStore.GetMachine(context.Background(), "vm-resize-storage-only")
+	if err != nil {
+		t.Fatalf("get resized machine: %v", err)
+	}
+	if resized.MemoryMiB != 8192 {
+		t.Fatalf("memory = %d, want 8192", resized.MemoryMiB)
+	}
+	if resized.StorageBytes != nextStorageBytes {
+		t.Fatalf("storage = %d, want %d", resized.StorageBytes, nextStorageBytes)
+	}
+}
+
+func TestResizeMachineAlreadyAtRequestedSizeDoesNotStopRunningMachine(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	fileStore, err := store.NewFileStore(cfg.StatePath, cfg.OperationsPath)
+	if err != nil {
+		t.Fatalf("create file store: %v", err)
+	}
+
+	runtime := &fakeRuntime{}
+	hostDaemon, err := New(cfg, fileStore, runtime)
+	if err != nil {
+		t.Fatalf("create daemon: %v", err)
+	}
+
+	now := time.Now().UTC()
+	if err := fileStore.CreateMachine(context.Background(), model.MachineRecord{
+		ID:           "vm-resize-idempotent",
+		MemoryMiB:    4096,
+		StorageBytes: 8 << 20,
+		RuntimeHost:  "172.16.0.8",
+		TapDevice:    "fctap-idem",
+		Phase:        contracthost.MachinePhaseRunning,
+		PID:          3456,
+		SocketPath:   filepath.Join(root, "runtime", "vm-resize-idempotent.sock"),
+		Ports:        defaultMachinePorts(),
+		CreatedAt:    now,
+		StartedAt:    &now,
+	}); err != nil {
+		t.Fatalf("create machine: %v", err)
+	}
+
+	response, err := hostDaemon.ResizeMachine(context.Background(), "vm-resize-idempotent", contracthost.ResizeMachineRequest{
+		MemoryMiB:    4096,
+		StorageBytes: 8 << 20,
+	})
+	if err != nil {
+		t.Fatalf("resize machine: %v", err)
+	}
+	if response.Machine.Phase != contracthost.MachinePhaseRunning {
+		t.Fatalf("response phase = %q, want running", response.Machine.Phase)
+	}
+	if len(runtime.deleteCalls) != 0 {
+		t.Fatalf("runtime delete call count = %d, want 0", len(runtime.deleteCalls))
+	}
+	operations, err := fileStore.ListOperations(context.Background())
+	if err != nil {
+		t.Fatalf("list operations: %v", err)
+	}
+	if len(operations) != 0 {
+		t.Fatalf("operations left behind: %#v", operations)
 	}
 }
 
@@ -743,6 +1019,8 @@ func TestRestoreSnapshotFallsBackToLocalSnapshotNetwork(t *testing.T) {
 			KernelImageURL: server.URL + "/kernel",
 			RootFSURL:      server.URL + "/rootfs",
 		},
+		MemoryMiB:    4096,
+		StorageBytes: int64(12 * 1024 * 1024 * 1024),
 		Snapshot: &contracthost.DurableSnapshotSpec{
 			SnapshotID: "snap1",
 			MachineID:  "source",
@@ -764,6 +1042,9 @@ func TestRestoreSnapshotFallsBackToLocalSnapshotNetwork(t *testing.T) {
 	}
 	if runtime.bootCalls != 1 {
 		t.Fatalf("boot call count mismatch: got %d want 1", runtime.bootCalls)
+	}
+	if runtime.lastSpec.MemoryMiB != 4096 {
+		t.Fatalf("restore runtime memory mismatch: got %d want 4096", runtime.lastSpec.MemoryMiB)
 	}
 	if runtime.restoreCalls != 0 {
 		t.Fatalf("restore boot call count mismatch: got %d want 0", runtime.restoreCalls)
@@ -890,8 +1171,8 @@ func TestRestoreSnapshotUsesLocalSnapshotArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read restored machine-name: %v", err)
 	}
-	if machineName != "restored-local\n" {
-		t.Fatalf("restored machine-name mismatch: got %q want %q", machineName, "restored-local\n")
+	if machineName != "agentcomputer\n" {
+		t.Fatalf("restored machine-name mismatch: got %q want %q", machineName, "agentcomputer\n")
 	}
 }
 
@@ -1041,6 +1322,8 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 			KernelImageURL: server.URL + "/kernel",
 			RootFSURL:      server.URL + "/rootfs",
 		},
+		MemoryMiB:    4096,
+		StorageBytes: int64(12 * 1024 * 1024 * 1024),
 		Snapshot: &contracthost.DurableSnapshotSpec{
 			SnapshotID:        "snap1",
 			MachineID:         "source",
@@ -1085,6 +1368,12 @@ func TestRestoreSnapshotUsesDurableSnapshotSpec(t *testing.T) {
 	}
 	if machine.GuestConfig == nil || machine.GuestConfig.Hostname != "restored-shell" {
 		t.Fatalf("stored guest config mismatch: %#v", machine.GuestConfig)
+	}
+	if machine.MemoryMiB != 4096 {
+		t.Fatalf("stored restored memory mismatch: got %d want 4096", machine.MemoryMiB)
+	}
+	if machine.StorageBytes != 12*1024*1024*1024 {
+		t.Fatalf("stored restored storage mismatch: got %d want %d", machine.StorageBytes, int64(12*1024*1024*1024))
 	}
 	if len(machine.UserVolumeIDs) != 1 {
 		t.Fatalf("restored machine user volumes mismatch: got %#v", machine.UserVolumeIDs)

@@ -29,6 +29,8 @@ type ArtifactRecord struct {
 type MachineRecord struct {
 	ID                contracthost.MachineID
 	Artifact          contracthost.ArtifactRef
+	MemoryMiB         int64
+	StorageBytes      int64
 	GuestConfig       *contracthost.GuestConfig
 	SystemVolumeID    contracthost.VolumeID
 	UserVolumeIDs     []contracthost.VolumeID
@@ -46,14 +48,22 @@ type MachineRecord struct {
 }
 
 type VolumeRecord struct {
-	ID                contracthost.VolumeID
-	Kind              contracthost.VolumeKind
-	AttachedMachineID *contracthost.MachineID
-	SourceArtifact    *contracthost.ArtifactRef
-	Pool              StoragePool
-	Path              string
-	CreatedAt         time.Time
+	ID                    contracthost.VolumeID
+	Kind                  contracthost.VolumeKind
+	AttachedMachineID     *contracthost.MachineID
+	SourceArtifact        *contracthost.ArtifactRef
+	Pool                  StoragePool
+	Path                  string
+	Purpose               VolumePurpose
+	DeleteOnMachineDelete bool
+	CreatedAt             time.Time
 }
+
+type VolumePurpose string
+
+const (
+	VolumePurposeWorkspace VolumePurpose = "workspace"
+)
 
 type MachineOperation string
 
@@ -61,6 +71,7 @@ const (
 	MachineOperationCreate   MachineOperation = "create"
 	MachineOperationStart    MachineOperation = "start"
 	MachineOperationStop     MachineOperation = "stop"
+	MachineOperationResize   MachineOperation = "resize"
 	MachineOperationDelete   MachineOperation = "delete"
 	MachineOperationSnapshot MachineOperation = "snapshot"
 	MachineOperationRestore  MachineOperation = "restore"
@@ -98,9 +109,23 @@ type PublishedPortRecord struct {
 	CreatedAt time.Time
 }
 
+type MountRecord struct {
+	ID            contracthost.MountID
+	MachineID     contracthost.MachineID
+	Kind          contracthost.MountKind
+	TargetPath    string
+	ReadOnly      bool
+	Config        contracthost.MountConfig
+	Status        contracthost.MountStatus
+	StatusMessage string
+	CreatedAt     time.Time
+}
+
 type OperationRecord struct {
-	MachineID  contracthost.MachineID
-	Type       MachineOperation
-	StartedAt  time.Time
-	SnapshotID *contracthost.SnapshotID `json:"snapshot_id,omitempty"`
+	MachineID    contracthost.MachineID
+	Type         MachineOperation
+	StartedAt    time.Time
+	SnapshotID   *contracthost.SnapshotID `json:"snapshot_id,omitempty"`
+	MemoryMiB    int64                    `json:"memory_mib,omitempty"`
+	StorageBytes int64                    `json:"storage_bytes,omitempty"`
 }

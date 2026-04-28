@@ -111,7 +111,10 @@ func (d *Daemon) StartMachine(ctx context.Context, id contracthost.MachineID) (*
 		return nil, err
 	}
 	repairDirtyFilesystem(systemVolume.Path)
-	spec, err := d.buildMachineSpec(id, artifact, userVolumes, systemVolume.Path, record.GuestConfig, readyNonce)
+	for _, volume := range userVolumes {
+		repairDirtyFilesystem(volume.Path)
+	}
+	spec, err := d.buildMachineSpec(id, record.MemoryMiB, artifact, userVolumes, systemVolume.Path, record.GuestConfig, readyNonce)
 	if err != nil {
 		return nil, err
 	}
@@ -182,6 +185,62 @@ func (d *Daemon) StopMachine(ctx context.Context, id contracthost.MachineID) err
 	return nil
 }
 
+func (d *Daemon) ResizeMachine(ctx context.Context, id contracthost.MachineID, req contracthost.ResizeMachineRequest) (*contracthost.ResizeMachineResponse, error) {
+	if err := validateMachineID(id); err != nil {
+		return nil, err
+	}
+
+	unlock := d.lockMachine(id)
+	defer unlock()
+
+	record, err := d.store.GetMachine(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	requestedMemoryMiB := req.MemoryMiB
+	if requestedMemoryMiB <= 0 {
+		requestedMemoryMiB = record.MemoryMiB
+	}
+	requestedStorageBytes := req.StorageBytes
+	if requestedStorageBytes <= 0 {
+		requestedStorageBytes = record.StorageBytes
+	}
+
+	if err := d.store.UpsertOperation(ctx, model.OperationRecord{
+		MachineID:    id,
+		Type:         model.MachineOperationResize,
+		StartedAt:    time.Now().UTC(),
+		MemoryMiB:    requestedMemoryMiB,
+		StorageBytes: requestedStorageBytes,
+	}); err != nil {
+		return nil, err
+	}
+
+	clearOperation := false
+	defer func() {
+		if clearOperation {
+			_ = d.store.DeleteOperation(context.Background(), id)
+		}
+	}()
+
+	if record.MemoryMiB == requestedMemoryMiB && record.StorageBytes == requestedStorageBytes {
+		clearOperation = true
+		return &contracthost.ResizeMachineResponse{Machine: machineToContract(*record)}, nil
+	}
+
+	if err := d.resizeMachineRecord(ctx, record, requestedMemoryMiB, requestedStorageBytes); err != nil {
+		return nil, err
+	}
+
+	resized, err := d.store.GetMachine(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	clearOperation = true
+	return &contracthost.ResizeMachineResponse{Machine: machineToContract(*resized)}, nil
+}
+
 func (d *Daemon) DeleteMachine(ctx context.Context, id contracthost.MachineID) error {
 	unlock := d.lockMachine(id)
 	defer unlock()
@@ -242,6 +301,10 @@ func (d *Daemon) Reconcile(ctx context.Context) error {
 			if err := d.reconcileStop(ctx, operation.MachineID); err != nil {
 				return err
 			}
+		case model.MachineOperationResize:
+			if err := d.reconcileResize(ctx, operation); err != nil {
+				return err
+			}
 		case model.MachineOperationDelete:
 			if err := d.reconcileDelete(ctx, operation.MachineID); err != nil {
 				return err
@@ -273,6 +336,9 @@ func (d *Daemon) Reconcile(ctx context.Context) error {
 				return err
 			}
 			if err := d.ensurePublishedPortsForMachine(ctx, *reconciled); err != nil {
+				return err
+			}
+			if err := d.ensureMountsForMachine(ctx, *reconciled); err != nil {
 				return err
 			}
 		} else {
@@ -369,6 +435,23 @@ func (d *Daemon) reconcileStart(ctx context.Context, machineID contracthost.Mach
 		return err
 	}
 	return d.store.DeleteOperation(ctx, machineID)
+}
+
+func (d *Daemon) reconcileResize(ctx context.Context, operation model.OperationRecord) error {
+	record, err := d.store.GetMachine(ctx, operation.MachineID)
+	if err == store.ErrNotFound {
+		return d.store.DeleteOperation(ctx, operation.MachineID)
+	}
+	if err != nil {
+		return err
+	}
+	if operation.MemoryMiB <= 0 || operation.StorageBytes <= 0 {
+		return d.store.DeleteOperation(ctx, operation.MachineID)
+	}
+	if err := d.resizeMachineRecord(ctx, record, operation.MemoryMiB, operation.StorageBytes); err != nil {
+		return err
+	}
+	return d.store.DeleteOperation(ctx, operation.MachineID)
 }
 
 func (d *Daemon) reconcileDelete(ctx context.Context, machineID contracthost.MachineID) error {
@@ -520,6 +603,50 @@ func (d *Daemon) stopMachineRecord(ctx context.Context, record *model.MachineRec
 	return d.store.UpdateMachine(ctx, *record)
 }
 
+func (d *Daemon) resizeMachineRecord(ctx context.Context, record *model.MachineRecord, memoryMiB, storageBytes int64) error {
+	if record.Phase != contracthost.MachinePhaseRunning && record.Phase != contracthost.MachinePhaseStopped {
+		return fmt.Errorf("machine %q is not resizable from phase %q", record.ID, record.Phase)
+	}
+	if storageBytes < record.StorageBytes {
+		return fmt.Errorf("requested storage %d bytes is smaller than current storage %d bytes", storageBytes, record.StorageBytes)
+	}
+
+	systemVolume, err := d.store.GetVolume(ctx, record.SystemVolumeID)
+	if err != nil {
+		return err
+	}
+	if record.Phase == contracthost.MachinePhaseRunning {
+		if err := d.stopMachineRecord(ctx, record); err != nil {
+			return err
+		}
+	}
+
+	systemInfo, err := os.Stat(systemVolume.Path)
+	if err != nil {
+		return fmt.Errorf("stat system volume %q: %w", systemVolume.Path, err)
+	}
+	if storageBytes < systemInfo.Size() {
+		return fmt.Errorf("requested storage %d bytes is smaller than current system volume %d bytes", storageBytes, systemInfo.Size())
+	}
+	if storageBytes > systemInfo.Size() {
+		if err := os.Truncate(systemVolume.Path, storageBytes); err != nil {
+			return fmt.Errorf("expand system volume for %q: %w", record.ID, err)
+		}
+	}
+
+	record.MemoryMiB = resolveRequestedMemoryMiB(memoryMiB)
+	record.StorageBytes = storageBytes
+	record.Phase = contracthost.MachinePhaseStopped
+	record.Error = ""
+	record.GuestReadyNonce = ""
+	record.PID = 0
+	record.SocketPath = ""
+	record.RuntimeHost = ""
+	record.TapDevice = ""
+	record.StartedAt = nil
+	return d.store.UpdateMachine(ctx, *record)
+}
+
 // shutdownGuestClean attempts an in-guest poweroff and waits for the
 // Firecracker process to exit within the stop timeout. Returns true if the
 // process exited cleanly, false if a forced teardown is needed.
@@ -601,6 +728,15 @@ func (d *Daemon) detachVolumesForMachine(ctx context.Context, machineID contract
 	}
 	for _, volume := range volumes {
 		if volume.AttachedMachineID == nil || *volume.AttachedMachineID != machineID {
+			continue
+		}
+		if volume.DeleteOnMachineDelete {
+			if err := os.Remove(volume.Path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove managed volume %q: %w", volume.Path, err)
+			}
+			if err := d.store.DeleteVolume(ctx, volume.ID); err != nil && err != store.ErrNotFound {
+				return err
+			}
 			continue
 		}
 		volume.AttachedMachineID = nil
