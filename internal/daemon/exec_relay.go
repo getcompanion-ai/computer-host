@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
+	contracthost "github.com/AgentComputerAI/computer-host/contract"
 )
 
 func (d *Daemon) EnsureExecRelay(ctx context.Context, id contracthost.MachineID) (*contracthost.GetMachineResponse, error) {

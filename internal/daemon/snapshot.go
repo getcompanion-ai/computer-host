@@ -12,10 +12,10 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/getcompanion-ai/computer-host/internal/httpapi"
-	"github.com/getcompanion-ai/computer-host/internal/model"
-	"github.com/getcompanion-ai/computer-host/internal/store"
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
+	"github.com/AgentComputerAI/computer-host/internal/httpapi"
+	"github.com/AgentComputerAI/computer-host/internal/model"
+	"github.com/AgentComputerAI/computer-host/internal/store"
+	contracthost "github.com/AgentComputerAI/computer-host/contract"
 )
 
 const localSnapshotRestoreUnavailablePrefix = "local snapshot restore unavailable"

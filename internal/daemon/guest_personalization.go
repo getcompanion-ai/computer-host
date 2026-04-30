@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getcompanion-ai/computer-host/internal/firecracker"
-	"github.com/getcompanion-ai/computer-host/internal/model"
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
+	"github.com/AgentComputerAI/computer-host/internal/firecracker"
+	"github.com/AgentComputerAI/computer-host/internal/model"
+	contracthost "github.com/AgentComputerAI/computer-host/contract"
 )
 
 const (

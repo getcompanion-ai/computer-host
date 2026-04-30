@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getcompanion-ai/computer-host/internal/firecracker"
+	"github.com/AgentComputerAI/computer-host/internal/firecracker"
 )
 
 const defaultSocketName = "firecracker-host.sock"

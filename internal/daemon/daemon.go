@@ -8,11 +8,11 @@ import (
 	"sync"
 	"time"
 
-	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
-	"github.com/getcompanion-ai/computer-host/internal/firecracker"
-	"github.com/getcompanion-ai/computer-host/internal/model"
-	"github.com/getcompanion-ai/computer-host/internal/store"
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
+	appconfig "github.com/AgentComputerAI/computer-host/internal/config"
+	"github.com/AgentComputerAI/computer-host/internal/firecracker"
+	"github.com/AgentComputerAI/computer-host/internal/model"
+	"github.com/AgentComputerAI/computer-host/internal/store"
+	contracthost "github.com/AgentComputerAI/computer-host/contract"
 )
 
 const (

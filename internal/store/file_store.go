@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/getcompanion-ai/computer-host/internal/model"
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
+	"github.com/AgentComputerAI/computer-host/internal/model"
+	contracthost "github.com/AgentComputerAI/computer-host/contract"
 )
 
 type FileStore struct {

@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/getcompanion-ai/computer-host/internal/model"
-	"github.com/getcompanion-ai/computer-host/internal/store"
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
+	"github.com/AgentComputerAI/computer-host/internal/model"
+	"github.com/AgentComputerAI/computer-host/internal/store"
+	contracthost "github.com/AgentComputerAI/computer-host/contract"
 )
 
 func TestEnsureExecRelayAllocatesRelayLazily(t *testing.T) {

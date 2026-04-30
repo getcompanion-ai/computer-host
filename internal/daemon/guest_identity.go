@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
+	contracthost "github.com/AgentComputerAI/computer-host/contract"
 )
 
 func (d *Daemon) reconfigureGuestIdentityOverSSH(ctx context.Context, runtimeHost string, machineID contracthost.MachineID, guestConfig *contracthost.GuestConfig) error {

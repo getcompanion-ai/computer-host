@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
+	contracthost "github.com/AgentComputerAI/computer-host/contract"
 )
 
 func TestInjectGuestConfigWritesAuthorizedKeysAndWebhook(t *testing.T) {

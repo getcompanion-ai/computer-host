@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
+	contracthost "github.com/AgentComputerAI/computer-host/contract"
 )
 
 type Service interface {

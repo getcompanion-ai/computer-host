@@ -3,8 +3,8 @@ package daemon
 import (
 	"testing"
 
-	"github.com/getcompanion-ai/computer-host/internal/model"
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
+	"github.com/AgentComputerAI/computer-host/internal/model"
+	contracthost "github.com/AgentComputerAI/computer-host/contract"
 )
 
 func TestBuildRcloneConfigEnvUsesS3ProviderForGCSInteroperability(t *testing.T) {

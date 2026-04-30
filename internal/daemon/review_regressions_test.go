@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/getcompanion-ai/computer-host/internal/firecracker"
-	"github.com/getcompanion-ai/computer-host/internal/model"
-	hoststore "github.com/getcompanion-ai/computer-host/internal/store"
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
+	"github.com/AgentComputerAI/computer-host/internal/firecracker"
+	"github.com/AgentComputerAI/computer-host/internal/model"
+	hoststore "github.com/AgentComputerAI/computer-host/internal/store"
+	contracthost "github.com/AgentComputerAI/computer-host/contract"
 )
 
 type blockingPublishedPortStore struct {

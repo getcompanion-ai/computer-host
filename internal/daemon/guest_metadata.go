@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/getcompanion-ai/computer-host/internal/firecracker"
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
+	"github.com/AgentComputerAI/computer-host/internal/firecracker"
+	contracthost "github.com/AgentComputerAI/computer-host/contract"
 )
 
 const (

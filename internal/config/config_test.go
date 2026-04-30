@@ -3,7 +3,7 @@ package config
 import (
 	"testing"
 
-	"github.com/getcompanion-ai/computer-host/internal/firecracker"
+	"github.com/AgentComputerAI/computer-host/internal/firecracker"
 )
 
 func TestLoadDiskCloneModeDefaultsToReflink(t *testing.T) {

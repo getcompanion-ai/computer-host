@@ -2,6 +2,7 @@
 
 <img width=auto height=auto alt="Gemini_Generated_Image_d10lsxd10lsxd10l" src="https://github.com/user-attachments/assets/2f422d7e-0e17-4106-826a-0516f1edc828" />
 
+
 computer-host is a daemon runtime for managing Firecracker microVMs
 on bare-metal Linux hosts. It talks directly to the Firecracker HTTP
 API via jailer, exposing a JSON interface over a Unix socket.
@@ -57,4 +58,4 @@ curl --unix-socket /var/lib/computer-host/firecracker-host.sock \
 ```
 
 
-While some issues are resolved with github this repo is maintained [here](https://git.harivan.sh/getcompanion-ai/computer-host/issues)
+While some issues are resolved with github this repo is maintained [here](https://git.harivan.sh/AgentComputerAI/computer-host/issues)

@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"testing"
 
-	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
+	appconfig "github.com/AgentComputerAI/computer-host/internal/config"
 )
 
 func TestCloneDiskFileCopyPreservesSparseDiskUsage(t *testing.T) {

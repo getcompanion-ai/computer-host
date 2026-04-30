@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
+	contracthost "github.com/AgentComputerAI/computer-host/contract"
 )
 
 func (d *Daemon) GetStorageReport(ctx context.Context) (*contracthost.GetStorageReportResponse, error) {

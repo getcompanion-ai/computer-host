@@ -14,11 +14,11 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	appconfig "github.com/getcompanion-ai/computer-host/internal/config"
-	"github.com/getcompanion-ai/computer-host/internal/daemon"
-	"github.com/getcompanion-ai/computer-host/internal/firecracker"
-	"github.com/getcompanion-ai/computer-host/internal/httpapi"
-	"github.com/getcompanion-ai/computer-host/internal/store"
+	appconfig "github.com/AgentComputerAI/computer-host/internal/config"
+	"github.com/AgentComputerAI/computer-host/internal/daemon"
+	"github.com/AgentComputerAI/computer-host/internal/firecracker"
+	"github.com/AgentComputerAI/computer-host/internal/httpapi"
+	"github.com/AgentComputerAI/computer-host/internal/store"
 )
 
 func main() {

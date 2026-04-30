@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/getcompanion-ai/computer-host/internal/model"
-	contracthost "github.com/getcompanion-ai/computer-host/contract"
+	"github.com/AgentComputerAI/computer-host/internal/model"
+	contracthost "github.com/AgentComputerAI/computer-host/contract"
 )
 
 var ErrNotFound = errors.New("store: not found")
