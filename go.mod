@@ -1,3 +1,3 @@
-module github.com/getcompanion-ai/computer-host
+module github.com/AgentComputerAI/computer-host
 
 go 1.26.1
